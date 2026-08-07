@@ -1,0 +1,239 @@
+{
+  "verified_at": "2026-08-07T04:50:19Z",
+  "status": "release_ready",
+  "ship_status": "ready-to-publish",
+  "launcher": {
+    "area": "statusBar.right",
+    "label": "Agent Dock",
+    "persistent": true,
+    "native_statusbar_visible": true
+  },
+  "pane": {
+    "placement": "right",
+    "overlaps_chat": false,
+    "open_width_px": 479.987,
+    "resized_width_px": 543.999,
+    "native_separator": true,
+    "toggle_open": true,
+    "toggle_closed": true,
+    "reopened_with_state": true,
+    "composer_x_open_px": 557.55,
+    "composer_x_closed_px": 797.544
+  },
+  "profiles": {
+    "count": 6,
+    "public_sample_labels": ["Default", "Buzz", "Jarvis", "Sanvith", "Warren"],
+    "private_profile_labels_redacted": 1
+  },
+  "native_inventory": {
+    "profile": "sanvith",
+    "providers": 4,
+    "models": 55,
+    "capability_rows": 55,
+    "provider_headers_rendered": ["NOUS PORTAL", "OPENAI CODEX", "OLLAMA", "GEMMA"]
+  },
+  "capability_gating": {
+    "unsupported_default": {
+      "model": "qwen3.5-9b-64k:latest",
+      "thinking_disabled": true,
+      "effort_disabled": true,
+      "fast_disabled": true
+    },
+    "supported_probe": {
+      "model": "gpt-5.6-sol",
+      "thinking_enabled": true,
+      "effort_enabled": true,
+      "fast_enabled": true
+    },
+    "restored_profile_default": true
+  },
+  "live_request_fields": [
+    "assign_task",
+    "fast",
+    "message",
+    "model",
+    "profile",
+    "provider",
+    "reasoning_effort",
+    "request_id",
+    "session_id"
+  ],
+  "tests": {
+    "node": {"passed": 13, "failed": 0},
+    "python": {"passed": 35, "failed": 0},
+    "javascript_syntax": "passed",
+    "python_compile": "passed",
+    "focused_stdin_regression": {"passed": 1, "failed": 0},
+    "isolated_install_uninstall": "passed",
+    "installed_source_parity": true,
+    "text_files_scanned": 19,
+    "secret_findings": 0,
+    "format_findings": 0
+  },
+  "strict_assignment_contract": {
+    "assign_task_accepts_only_json_boolean": true,
+    "request_id_required_for_assignment": true,
+    "invalid_assignment_allocates_job": false,
+    "invalid_assignment_creates_card": false
+  },
+  "screenshots": [
+    "proof/agent-dock-native-open-sanitized.png",
+    "proof/agent-dock-native-closed-sanitized.png"
+  ],
+  "proof_media_audit": {
+    "sanitized": true,
+    "main_workspace_content_redacted": true,
+    "unrelated_notifications_excluded": true,
+    "private_profile_labels_excluded": true,
+    "stale_floating_overlay_excluded": true,
+    "plugin_load_error_capture_excluded": true,
+    "model_inventory_evidence": "UI Automation plus frontend regression tests; model-selector screenshots excluded from public media"
+  },
+  "post_review_fix": {
+    "finding": "Existing request-id retries were revalidating the model catalog before resolving the reservation ledger.",
+    "fixed": true,
+    "installed_source_parity": true,
+    "live_runtime_activated": true,
+    "independent_rereview": {
+      "focused_tests_passed": 2,
+      "blocking_findings": 0,
+      "verdict": "ship"
+    }
+  },
+  "release_hardening_review": {
+    "reviewer": "Codex CLI 0.146.0 through OpenCodex",
+    "mode": "read-only uncommitted worktree review",
+    "completed_passes": 6,
+    "accepted_findings": 20,
+    "findings_fixed": 20,
+    "severity": {"p1": 10, "p2": 10},
+    "final_python_tests": {"passed": 40, "failed": 0},
+    "final_frontend_tests": {"passed": 16, "failed": 0},
+    "final_clean_pass_completed": true,
+    "verdict": "ready-to-ship"
+  },
+  "compact_activity_update": {
+    "installed_source_parity": true,
+    "pane_width_contract": "clamp(19rem, 24vw, 22rem)",
+    "min_width": "18rem",
+    "max_width": "26rem",
+    "live_compact_layout_visible": true,
+    "live_height_compaction_visible": true,
+    "removed_ui_block": "Thinking, effort, and Fast controls",
+    "composer_min_height": "3.25rem",
+    "native_toggle_reverified": true,
+    "working_states": ["starting", "queued", "running", "finalizing", "cancelling"],
+    "terminal_states_excluded_by_test": ["done", "cancelled"],
+    "hidden_pane_activity_polling": true,
+    "active_job_visual_state_live_probe": true,
+    "idle_status_live_probe": true,
+    "idle_profile_count_live_verified": 6,
+    "starting_job_expiry_ms": 60000,
+    "structured_404_handling": true,
+    "transient_error_activity_preserved": true,
+    "cancellation_label_truthful": true,
+    "independent_rereview": {
+      "blocking_findings": 0,
+      "verdict": "ship"
+    }
+  },
+  "native_vertical_split": {
+    "contribution_id": "dock-v3",
+    "dock_target": {"pane": "files", "position": "top"},
+    "initial_height": "50%",
+    "dock_content_fills_tile": true,
+    "lower_tile": "Files",
+    "unused_black_region": false,
+    "native_divider_resize_live_verified": true,
+    "expanded_and_restored_to_half": true,
+    "installed_source_parity": true
+  },
+  "conversation_and_assignment": {
+    "frontend_reply_append_regression_tested": true,
+    "runner_reply_extraction_regression_tested": true,
+    "sanitized_actionable_error_tail_regression_tested": true,
+    "normal_chat_assign_task_default": false,
+    "explicit_assignment_button_live_enabled": true,
+    "kanban_board": "executive-organization",
+    "kanban_creation_and_identity_regression_tested": true,
+    "normal_chat_live_acceptance": {
+      "profile": "buzz",
+      "model": "gpt-5.6-luna",
+      "message": "Reply exactly: DOCK_CHAT_OK",
+      "assistant_response": "DOCK_CHAT_OK",
+      "matching_kanban_cards_created": 0
+    },
+    "explicit_assignment_live_acceptance": {
+      "verification_id": "20260806T054915Z",
+      "profile": "buzz",
+      "model": "gpt-5.6-luna",
+      "assistant_response": "TASK_OK",
+      "task_id": "t_02ceb556",
+      "job_id": "caf27e4eaab540f6864b04b21b77633b",
+      "idempotency_key_present": true,
+      "event_sequence": ["created", "commented", "blocked"],
+      "final_status": "blocked",
+      "block_kind": "needs_input",
+      "cleanup": {
+        "deleted_with_hermes_kanban_api": true,
+        "matching_tasks_remaining": 0,
+        "board_task_count_restored": 44
+      },
+      "assistant_response_persisted_in_dock": true,
+      "profile_returned_to_idle": true,
+      "assignment_control_reset": true
+    },
+    "live_backend_route_mounted_on_all_profile_gateways": true,
+    "activation": "full Hermes Desktop restart",
+    "restarted_process_verified": true,
+    "installed_source_parity": {
+      "plugin.js": true,
+      "plugin.yaml": true,
+      "manifest.json": true,
+      "plugin_api.py": true,
+      "dock_runner.py": true
+    },
+    "public_docs_match_native_pane_and_assignment_contract": true,
+    "message_timestamps": {
+      "new_messages_persist_epoch_ms": true,
+      "display_local_date_time_seconds_timezone": true,
+      "legacy_missing_time_labeled_unavailable": true,
+      "frontend_regression_tested": true
+    },
+    "independent_review": {
+      "completed_passes": 6,
+      "accepted_findings": 20,
+      "findings_fixed": 20,
+      "completed": true,
+      "ship_gate": "passed"
+    }
+  },
+  "final_release_closeout": {
+    "source_tests": {"python": "40/40", "frontend": "16/16"},
+    "compile_and_diff_checks": "passed",
+    "files_scanned": 19,
+    "secret_privacy_findings": 0,
+    "format_findings": 0,
+    "installed_source_manifest_parity": "5/5",
+    "packaged_cache_artifacts": 0,
+    "runtime_generated_cache_artifacts_after_activation": 2,
+    "plugin_inventory_status": "enabled",
+    "desktop_restart": {
+      "old_main_pid": 11668,
+      "new_main_pid": 2716,
+      "same_executable": true,
+      "temporary_scheduled_task_deleted": true
+    },
+    "backend_activation": {
+      "mounted_at": "2026-08-06 08:25:27",
+      "route": "/api/plugins/hermes-agent-dock/",
+      "post_restart_plugin_errors": 0
+    },
+    "blocking_gate": null,
+    "decision": "ship"
+  },
+  "limitations": [
+    "Live acceptance used two bounded Buzz requests on the configured gpt-5.6-luna model because Default-profile local-model selection could not be reliably automated in the Electron popup.",
+    "Dedicated ruff, bandit, gitleaks, and detect-secrets executables were not installed; validation used Python compilation, the repository test suites, command-level lifecycle tests, and a 19-file high-signal secret scan."
+  ]
+}
