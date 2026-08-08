@@ -83,13 +83,28 @@ def uninstall(home: Path, copy_only: bool = False, purge: bool = False) -> dict[
         stamp = f"{time.strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:8]}"
         backup = home / "backups" / PLUGIN_ID / f"uninstall-{stamp}"
         backup.mkdir(parents=True, exist_ok=False)
-    for path in existing:
-        if purge:
-            shutil.rmtree(path)
-        else:
+        for path in existing:
             label = "desktop" if path == desktop else "backend"
-            shutil.move(str(path), str(backup / label))
+            shutil.copytree(path, backup / label)
+    try:
+        for path in existing:
+            label = "desktop" if path == desktop else "backend"
+            shutil.rmtree(path)
             moved.append(label)
+    except Exception as exc:
+        if purge or backup is None:
+            raise
+        try:
+            for path in existing:
+                label = "desktop" if path == desktop else "backend"
+                if path.exists():
+                    shutil.rmtree(path)
+                shutil.copytree(backup / label, path)
+        except Exception as rollback_exc:
+            raise RuntimeError(
+                f"Uninstall failed and automatic rollback also failed; preserved backup: {backup}"
+            ) from rollback_exc
+        raise RuntimeError("Uninstall failed; installed files restored") from exc
     return {
         "plugin": PLUGIN_ID,
         "disabled": disable_result,

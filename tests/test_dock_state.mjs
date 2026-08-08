@@ -10,10 +10,20 @@ const exported = [
   'activitySummary',
   'appendUniqueMessage',
   'buildJobPayload',
+  'compactModelLabel',
+  'dockModeAction',
+  'dockPaneData',
+  'extractClipboardImageFiles',
   'flattenModelOptions',
   'formatMessageTimestamp',
   'groupModelOptions',
+  'migrateSavedModelSelections',
   'modelOptionKey',
+  'modelPresentation',
+  'nextDockMode',
+  'normalizeDockMode',
+  'reasoningEffortForSliderPosition',
+  'reasoningEffortSliderPosition',
   'profileActivityLabel',
   'profileDisplayLabel',
   'reconcileIdempotentSubmission',
@@ -23,9 +33,11 @@ const exported = [
   'reserveProfileJob',
   'resolveActiveJobActivities',
   'resolveModelSettings',
+  'shouldConsumeClipboardPaste',
   'stampMessage',
   'submitWithIdempotentRetry',
   'upsertProfileJob',
+  'validateImageFileMetadata',
   'workingProfileNames'
 ].join(', ')
 const state = await import(`data:text/javascript;base64,${Buffer.from(`${helpers}\nexport { ${exported} }`).toString('base64')}`)
@@ -51,6 +63,39 @@ const catalog = {
     }
   ]
 }
+
+test('floating mode is the explicit default and Dock/Undock mode changes are normalized', () => {
+  assert.equal(state.normalizeDockMode(undefined), 'floating')
+  assert.equal(state.normalizeDockMode('floating'), 'floating')
+  assert.equal(state.normalizeDockMode('docked'), 'docked')
+  assert.equal(state.normalizeDockMode('right'), 'floating')
+  assert.equal(state.nextDockMode('floating'), 'docked')
+  assert.equal(state.nextDockMode('docked'), 'floating')
+  assert.equal(state.nextDockMode('invalid'), 'docked')
+  assert.equal(state.dockModeAction('floating'), 'Dock')
+  assert.equal(state.dockModeAction('docked'), 'Undock')
+  assert.deepEqual(state.dockPaneData('floating'), {
+    placement: 'floating',
+    anchor: 'top-right',
+    width: '380px',
+    height: '540px',
+    uncloseable: true
+  })
+  assert.deepEqual(state.dockPaneData('docked'), {
+    placement: 'bottom',
+    dock: { pane: 'workspace', pos: 'bottom' },
+    height: '42vh',
+    minHeight: '18rem',
+    maxHeight: '70vh',
+    uncloseable: true
+  })
+  assert.deepEqual(state.dockPaneData('invalid'), state.dockPaneData('floating'))
+  assert.match(pluginSource, /const DEFAULT_DOCK_MODE = 'floating'/)
+  assert.match(pluginSource, /storage\.get\('dock-mode', DEFAULT_DOCK_MODE\)/)
+  assert.match(pluginSource, /storage\.set\('dock-mode', nextMode\)/)
+  assert.match(pluginSource, /data-agent-dock-mode': normalizedDockMode/)
+  assert.match(pluginSource, /children: dockAction/)
+})
 
 test('A and B reserve independent job slots and identity removal cannot clear the other job', () => {
   let jobs = {}
@@ -148,12 +193,48 @@ test('agent labels are proper case while payload identity stays raw', () => {
   const payload = state.buildJobPayload({
     profile: 'atlas', provider: 'openai-codex', model: 'gpt-5.6-terra',
     thinking: true, effort: 'xhigh', fast: true, message: 'hello',
+    images: [{ name: 'proof.png', mime_type: 'image/png', size: 12, data_url: 'data:image/png;base64,AAAA', private: 'omit' }],
     session_id: null, request_id: 'req-1', assign_task: true, modelPayload: catalog
   })
   assert.equal(payload.profile, 'atlas')
   assert.equal(payload.reasoning_effort, 'xhigh')
   assert.equal(payload.fast, true)
   assert.equal(payload.assign_task, true)
+  assert.deepEqual(payload.images, [{ name: 'proof.png', mime_type: 'image/png', data_url: 'data:image/png;base64,AAAA' }])
+})
+
+test('image selection is type, size, and count bounded before transport', () => {
+  assert.equal(state.validateImageFileMetadata({ type: 'image/png', size: 100 }, 0), null)
+  assert.match(state.validateImageFileMetadata({ type: 'text/plain', size: 100 }, 0), /PNG/)
+  assert.match(state.validateImageFileMetadata({ type: 'image/png', size: 0 }, 0), /empty/)
+  assert.match(state.validateImageFileMetadata({ type: 'image/png', size: 10 * 1024 * 1024 + 1 }, 0), /10 MB/)
+  assert.match(state.validateImageFileMetadata({ type: 'image/png', size: 100 }, 4), /at most 4/)
+})
+
+test('clipboard image extraction accepts image files, deduplicates Chromium mirrors, and ignores text', () => {
+  const image = { name: 'clipboard.png', type: 'image/png', size: 512, lastModified: 7 }
+  const mirrored = {
+    items: [
+      { kind: 'string', type: 'text/plain', getAsFile: () => null },
+      { kind: 'file', type: 'image/png', getAsFile: () => image }
+    ],
+    files: [image]
+  }
+  assert.deepEqual(state.extractClipboardImageFiles(mirrored), [image])
+
+  const fallback = { items: [], files: [image, { name: 'notes.txt', type: 'text/plain', size: 20 }] }
+  assert.deepEqual(state.extractClipboardImageFiles(fallback), [image])
+  assert.deepEqual(state.extractClipboardImageFiles({ items: [], files: [] }), [])
+})
+
+test('clipboard paste consumes accepted image-only data without swallowing text or invalid images', () => {
+  const image = { name: 'clipboard.png', type: 'image/png', size: 512, lastModified: 7 }
+  const imageOnly = { getData: () => '' }
+  const mixed = { getData: type => type === 'text/plain' ? 'keep this text' : '' }
+  assert.equal(state.shouldConsumeClipboardPaste(imageOnly, [image], 0), true)
+  assert.equal(state.shouldConsumeClipboardPaste(mixed, [image], 0), false)
+  assert.equal(state.shouldConsumeClipboardPaste(imageOnly, [{ type: 'text/plain', size: 20 }], 0), false)
+  assert.equal(state.shouldConsumeClipboardPaste(imageOnly, [image], 4), false)
 })
 
 test('native catalog is flattened completely and remains provider grouped', () => {
@@ -163,6 +244,99 @@ test('native catalog is flattened completely and remains provider grouped', () =
   const groups = state.groupModelOptions(options)
   assert.deepEqual(groups.map(group => [group.provider, group.options.length]), [['openai-codex', 2], ['local', 1]])
   assert.notEqual(state.modelOptionKey('a', 'same'), state.modelOptionKey('b', 'same'))
+})
+
+test('legacy model selections migrate to provider-scoped objects without widening the catalog', () => {
+  assert.deepEqual(
+    state.migrateSavedModelSelections(
+      { jarvis: ' gpt-5.6-terra ', buzz: { provider: 'openai-codex', model: 'gpt-5.6-luna' } },
+      { jarvis: 'openai-codex' }
+    ),
+    {
+      jarvis: { provider: 'openai-codex', model: 'gpt-5.6-terra' },
+      buzz: { provider: 'openai-codex', model: 'gpt-5.6-luna' }
+    }
+  )
+  assert.deepEqual(state.migrateSavedModelSelections({ sanvith: 'qwen-local' }), {
+    sanvith: { provider: '', model: 'qwen-local' }
+  })
+  assert.deepEqual(state.migrateSavedModelSelections({ empty: '', bad: 42 }), {})
+})
+
+test('model presentation assigns exact workload tiers to the ten supported GPT models and falls back by capability', () => {
+  const expected = [
+    ['gpt-5.6-sol', 'GPT 5.6 Sol', 'high', 'High'],
+    ['gpt-5.6-sol-pro', 'GPT 5.6 Sol Pro', 'high', 'High'],
+    ['gpt-5.6-terra-pro', 'GPT 5.6 Terra Pro', 'high', 'High'],
+    ['gpt-5.6-terra', 'GPT 5.6 Terra', 'medium', 'Medium'],
+    ['gpt-5.6-luna-pro', 'GPT 5.6 Luna Pro', 'medium', 'Medium'],
+    ['gpt-5.5', 'GPT 5.5', 'medium', 'Medium'],
+    ['gpt-5.4', 'GPT 5.4', 'medium', 'Medium'],
+    ['gpt-5.6-luna', 'GPT 5.6 Luna', 'low', 'Low'],
+    ['gpt-5.4-mini', 'GPT 5.4 Mini', 'low', 'Low'],
+    ['gpt-5.3-codex-spark', 'GPT 5.3 Codex Spark', 'low', 'Low']
+  ]
+  for (const [model, label, tier, tierLabel] of expected) {
+    assert.deepEqual(state.modelPresentation(model), { label, tier, tierLabel })
+  }
+  assert.deepEqual(
+    state.modelPresentation('unknown-model', { reasoning: true }),
+    { label: 'unknown-model', tier: 'medium', tierLabel: 'Medium' }
+  )
+  assert.deepEqual(
+    state.modelPresentation('unknown-model', { reasoning: false }),
+    { label: 'unknown-model', tier: 'low', tierLabel: 'Low' }
+  )
+})
+
+test('reasoning effort slider maps only to Low, Medium, and High values', () => {
+  assert.equal(state.reasoningEffortSliderPosition('minimal'), 0)
+  assert.equal(state.reasoningEffortSliderPosition('low'), 0)
+  assert.equal(state.reasoningEffortSliderPosition('medium'), 1)
+  assert.equal(state.reasoningEffortSliderPosition('high'), 2)
+  assert.equal(state.reasoningEffortSliderPosition('xhigh'), 2)
+  assert.equal(state.reasoningEffortForSliderPosition(0), 'low')
+  assert.equal(state.reasoningEffortForSliderPosition(1), 'medium')
+  assert.equal(state.reasoningEffortForSliderPosition(2), 'high')
+  assert.equal(state.reasoningEffortForSliderPosition(99), 'medium')
+})
+
+test('compact model labels strip only the leading GPT family prefix', () => {
+  assert.equal(state.compactModelLabel('GPT 5.6 Sol'), '5.6 Sol')
+  assert.equal(state.compactModelLabel('Claude Opus 4.1'), 'Claude Opus 4.1')
+  assert.equal(state.compactModelLabel(''), 'No model')
+})
+
+test('compact model menu separates the model workload tier from reasoning effort', () => {
+  assert.match(pluginSource, /DropdownMenuTrigger/)
+  assert.match(pluginSource, /name: 'zap'/)
+  assert.match(pluginSource, /children: compactSelectedModelLabel/)
+  assert.match(pluginSource, /children: 'Advanced'/)
+  assert.match(pluginSource, /children: 'Model'/)
+  assert.match(pluginSource, /children: 'Effort'/)
+  assert.match(pluginSource, /setModelMenuPanel\('model'\)/)
+  assert.match(pluginSource, /setModelMenuPanel\('effort'\)/)
+  assert.match(pluginSource, /setModelMenuPanel\('advanced'\)/)
+  assert.match(pluginSource, /textValue: `\$\{presentation\.label\} \$\{presentation\.tierLabel\} workload`/)
+  assert.match(pluginSource, /children: presentation\.tierLabel/)
+  assert.match(pluginSource, /title: `Workload tier: \$\{presentation\.tierLabel\}`/)
+  assert.match(pluginSource, /Reasoning effort: \$\{reasoningEffortLabel\}/)
+  assert.match(pluginSource, /type: 'range'/)
+  assert.match(pluginSource, /min: 0/)
+  assert.match(pluginSource, /max: 2/)
+  assert.match(pluginSource, /step: 1/)
+  assert.match(pluginSource, /'aria-label': 'Reasoning effort'/)
+  assert.match(pluginSource, /'aria-valuetext': reasoningEffortLabel/)
+  assert.match(pluginSource, /h-1 w-full appearance-none rounded-full bg-\(--ui-stroke-tertiary\)/)
+  assert.match(pluginSource, /accentColor: 'var\(--ui-accent\)'/)
+  assert.match(pluginSource, /haptic\('selection'\)/)
+  assert.match(pluginSource, /setEffort\(reasoningEffortForSliderPosition\(event\.target\.value\)\)/)
+  assert.match(pluginSource, /onKeyDown: event => event\.stopPropagation\(\)/)
+  assert.match(pluginSource, /disabled: !supportsReasoning \|\| !capabilities\.reasoning \|\| !effectiveThinking \|\| Boolean\(activeJob\)/)
+  assert.match(pluginSource, /children: 'Reasoning effort'/)
+  assert.match(pluginSource, /children: 'Low'/)
+  assert.match(pluginSource, /children: 'Medium'/)
+  assert.match(pluginSource, /children: 'High'/)
 })
 
 test('thinking, effort, and fast are capability gated', () => {
@@ -240,7 +414,16 @@ test('Agent selector exposes truthful Working, Cancelling, and Idle states', () 
   assert.equal(state.profileActivityLabel({ status: 'cancelling' }), 'Cancelling')
   assert.equal(state.profileActivityLabel({ status: 'success' }), 'Idle')
   assert.match(pluginSource, /Select agent\. \$\{profileDisplayLabel\(currentName\)\} is \$\{selectedActivityLabel\.toLowerCase\(\)\}/)
-  assert.match(pluginSource, /activeJob \? 'animate-pulse bg-\(--ui-accent\)' : 'bg-\(--ui-text-quaternary\)'/)
+  assert.match(pluginSource, /activeJob\s+\? jsx\(RubikWorkingOrb, \{ label: `\$\{profileDisplayLabel\(currentName\)\} working` \}\)/)
+  assert.match(pluginSource, /className: 'inline-block size-1\.5 shrink-0 rounded-full bg-\(--ui-text-quaternary\)'/)
+})
+
+test('chat activity uses the compact square orb without a duplicate status sentence', () => {
+  assert.match(pluginSource, /className: 'grid size-8 shrink-0 place-items-center rounded border border-\(--ui-stroke-secondary\) bg-\(--ui-bg-secondary\)'/)
+  assert.match(pluginSource, /role: 'status'/)
+  assert.match(pluginSource, /title: `\$\{profileDisplayLabel\(activeJob\.profile\)\} · \$\{profileActivityLabel\(activeJob\)\}`/)
+  assert.doesNotMatch(pluginSource, /is working in a direct session/)
+  assert.doesNotMatch(pluginSource, /is starting a direct session/)
 })
 
 test('transient polling failures retain the active job and continue reconciliation', () => {
@@ -258,22 +441,80 @@ test('achievement sound only represents a real unlock and toast expiry is indepe
   assert.match(pluginSource, /\[achievementToast\?\.id, achievementToast\?\.unlocked_at\]/)
 })
 
-test('plugin registers a persistent launcher and a native half-height split above Files', () => {
-  assert.match(pluginSource, /area:\s*STATUSBAR_AREAS\.right/)
-  assert.match(pluginSource, /id:\s*'dock-v3'/)
-  assert.match(pluginSource, /placement:\s*'right'/)
-  assert.match(pluginSource, /dock:\s*\{\s*pane:\s*'files',\s*pos:\s*'top'\s*\}/)
-  assert.match(pluginSource, /height:\s*'50%'/)
-  assert.doesNotMatch(pluginSource, /placement:\s*'floating'/)
+test('plugin registers floating and docked PANES_AREA modes plus pet, status-bar, and palette fallbacks', () => {
+  assert.match(pluginSource, /const PET_ACTIONS_AREA = 'pet\.actions'/)
+  assert.match(pluginSource, /ctx\.registerMany\(\[\s*\{\s*id:\s*'pet-toggle',\s*area:\s*PET_ACTIONS_AREA,\s*order:\s*80,\s*data:\s*\{\s*label:\s*'Toggle Agent Dock',\s*run:\s*\(\)\s*=>\s*\{\s*haptic\('tap'\)\s*toggleDock\(\)/)
+  assert.match(pluginSource, /id:\s*'launcher',\s*area:\s*STATUSBAR_AREAS\.right/)
+  assert.match(pluginSource, /id:\s*'focus',\s*area:\s*PALETTE_AREA/)
+  assert.match(pluginSource, /id:\s*nextMode === 'floating' \? 'dock-floating-v1' : 'dock-docked-v1'/)
+  assert.match(pluginSource, /placement:\s*'floating'/)
+  assert.match(pluginSource, /anchor:\s*'top-right'/)
+  assert.match(pluginSource, /width:\s*'380px'/)
+  assert.match(pluginSource, /height:\s*'540px'/)
+  assert.match(pluginSource, /placement:\s*'bottom'/)
+  assert.match(pluginSource, /dock:\s*\{\s*pane:\s*'workspace',\s*pos:\s*'bottom'\s*\}/)
+  assert.match(pluginSource, /height:\s*'42vh'/)
+  assert.match(pluginSource, /minHeight:\s*'18rem'/)
+  assert.match(pluginSource, /maxHeight:\s*'70vh'/)
+  assert.match(pluginSource, /data:\s*dockPaneData\(nextMode\)/)
+  assert.match(pluginSource, /render:\s*\(\) => jsx\(AgentDock, \{ mode: nextMode, onToggleMode: toggleDockMode \}\)/)
+  assert.match(pluginSource, /const toggleDockMode = \(\) => setDockMode\(nextDockMode\(\$dockMode\.get\(\)\)\)/)
+  assert.match(pluginSource, /closeDock\(\)\s*openDock\(nextMode\)/)
+  assert.doesNotMatch(pluginSource, /placement:\s*'right'/)
+  assert.doesNotMatch(pluginSource, /dock:\s*\{\s*pane:\s*'files',\s*pos:\s*'top'\s*\}/)
   assert.doesNotMatch(pluginSource, /Achievements 47\/60/)
-  assert.match(pluginSource, /width:\s*'clamp\(19rem, 24vw, 22rem\)'/)
-  assert.match(pluginSource, /minWidth:\s*'18rem'/)
-  assert.match(pluginSource, /maxWidth:\s*'26rem'/)
-  assert.match(pluginSource, /relative flex h-full min-h-0 flex-col/)
   assert.doesNotMatch(pluginSource, /dock-height-ratio/)
   assert.doesNotMatch(pluginSource, /Resize Agent Dock height/)
+  assert.match(pluginSource, /relative flex h-full min-h-0 flex-col/)
   assert.match(pluginSource, /storage\.get\('active-jobs'/)
-  assert.match(pluginSource, /working \? 'loading' : 'hubot'/)
+  assert.match(pluginSource, /storage\.get\('selected-models', \{\}\)/)
+  assert.match(pluginSource, /modelOptions\.length > 0/)
+  assert.match(pluginSource, /Workload tier: \$\{selectedModelPresentation\.tierLabel\} · Reasoning effort: \$\{reasoningEffortLabel\}/)
+  assert.equal((pluginSource.match(/jsx\(RubikWorkingOrb/g) || []).length, 3)
+  assert.doesNotMatch(pluginSource, /\bWorkingOrb\b/)
+  assert.match(pluginSource, /profileActivityLabel\(activeJob\)/)
+  assert.doesNotMatch(pluginSource, /activeStatusLabel/)
+  assert.match(pluginSource, /data-agent-dock-rubik-orb': 'true'/)
+  assert.doesNotMatch(pluginSource, /data-agent-dock-working-orb/)
+  assert.match(pluginSource, /RUBIK_SOLVING_20_PRESET = Object\.freeze\(\{/)
+  assert.match(pluginSource, /latRings: 4/)
+  assert.match(pluginSource, /lonDensity: 12/)
+  assert.match(pluginSource, /moveCount: 14/)
+  assert.match(pluginSource, /speed: 1\.95/)
+  assert.match(pluginSource, /rBase: 0\.6 \* 1\.9/)
+  assert.match(pluginSource, /rDepth: 1\.7 \* 1\.9/)
+  assert.match(pluginSource, /rActive: 0\.3 \* 1\.9/)
+  assert.match(pluginSource, /rsPow: 0\.6/)
+  assert.match(pluginSource, /rMin: 0\.3/)
+  assert.match(pluginSource, /radius: 0\.82/)
+  const paletteValues = paletteName => {
+    const body = pluginSource.match(new RegExp(`const ${paletteName} = Object\\.freeze\\(\\[([\\s\\S]*?)\\]\\)`))?.[1] || ''
+    return body.match(/'#[0-9a-f]{6}'/gi) || []
+  }
+  assert.equal(paletteValues('RUBIK_DARK_PALETTE').length, 6)
+  assert.equal(paletteValues('RUBIK_LIGHT_PALETTE').length, 6)
+  assert.notEqual(paletteValues('RUBIK_DARK_PALETTE').join(','), paletteValues('RUBIK_LIGHT_PALETTE').join(','))
+  assert.match(pluginSource, /function rubikOriginalAxisIndex\(x, y, z\)/)
+  assert.match(pluginSource, /if \(absX >= absY && absX >= absZ\) return x >= 0 \? 0 : 1/)
+  assert.match(pluginSource, /if \(absY >= absZ\) return y >= 0 \? 2 : 3/)
+  assert.match(pluginSource, /color: palette\[rubikOriginalAxisIndex\(originalX, originalY, originalZ\)\]/)
+  assert.match(pluginSource, /thinking-orbs paints this geometry monochrome/)
+  assert.match(pluginSource, /seconds \* RUBIK_SOLVING_20_PRESET\.speed/)
+  assert.match(pluginSource, /extractClipboardImageFiles\(event\.clipboardData\)/)
+  assert.match(pluginSource, /onPaste: pasteImages/)
+  assert.match(pluginSource, /style: \{ height: 20, width: 20 \}/)
+  assert.match(pluginSource, /prefers-reduced-motion: reduce/)
+  assert.match(pluginSource, /paintFrame\(0\.6\)/)
+  assert.match(pluginSource, /Math\.min\(2, window\.devicePixelRatio \|\| 1\)/)
+  assert.match(pluginSource, /new IntersectionObserver/)
+  assert.match(pluginSource, /document\.visibilityState === 'hidden'/)
+  assert.match(pluginSource, /cancelAnimationFrame\(animationFrame\)/)
+  assert.match(pluginSource, /observer\?\.disconnect\(\)/)
+  assert.match(pluginSource, /document\.removeEventListener\('visibilitychange', onVisibility\)/)
+  assert.match(pluginSource, /thinking-orbs 0\.2\.0 by Jakub Antalik/)
+  assert.match(pluginSource, /Copyright \(c\) 2026 Jakub Antalik/)
+  assert.match(pluginSource, /THIRD_PARTY_NOTICES\.md/)
+  assert.doesNotMatch(pluginSource, /name: working \? 'loading'/)
   assert.match(pluginSource, /window\.clearTimeout\(timer\)/)
   assert.match(pluginSource, /window\.clearInterval\(timer\)/)
   assert.match(pluginSource, /min-h-\[3\.25rem\]/)
@@ -281,7 +522,6 @@ test('plugin registers a persistent launcher and a native half-height split abov
   assert.match(pluginSource, /children:\s*assignTask \? 'Task ✓' : 'Assign task'/)
   assert.match(pluginSource, /Task \$\{job\.kanban_task_id\} was added/)
   assert.doesNotMatch(pluginSource, /aria-label': 'Enable thinking'/)
-  assert.doesNotMatch(pluginSource, /aria-label': 'Thinking strength'/)
   assert.doesNotMatch(pluginSource, /aria-label': 'Enable fast mode'/)
   assert.doesNotMatch(pluginSource, /--chrome-background/)
   assert.doesNotMatch(pluginSource, /--ui-control-background/)

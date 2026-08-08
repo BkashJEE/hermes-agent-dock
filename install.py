@@ -15,6 +15,7 @@ import uuid
 from pathlib import Path
 
 PLUGIN_ID = "hermes-agent-dock"
+VERSION = "0.2.0"
 ROOT = Path(__file__).resolve().parent
 ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 PLAIN_ROW_RE = re.compile(r"^(not enabled|enabled|disabled)\s+\S+\s+\S+\s+(\S+)\s*$", re.IGNORECASE)
@@ -52,6 +53,19 @@ def backup_existing(home: Path, destinations: list[Path]) -> Path | None:
     return backup
 
 
+def restore_installation(backup: Path | None, desktop_dir: Path, backend_dir: Path) -> None:
+    """Restore the exact pre-install file state after a failed replacement."""
+    for path in (desktop_dir, backend_dir):
+        if path.exists():
+            shutil.rmtree(path)
+    if backup is None:
+        return
+    for label, destination in (("desktop", desktop_dir), ("backend", backend_dir)):
+        source = backup / label
+        if source.exists():
+            shutil.copytree(source, destination)
+
+
 def run_hermes(home: Path, *args: str) -> subprocess.CompletedProcess[str]:
     executable = shutil.which("hermes")
     if not executable:
@@ -81,50 +95,56 @@ def install(home: Path, copy_only: bool = False) -> dict[str, object]:
     backend_dir = home / "plugins" / PLUGIN_ID
     home.mkdir(parents=True, exist_ok=True)
     backup = backup_existing(home, [desktop_dir, backend_dir])
-    if desktop_dir.exists():
-        shutil.rmtree(desktop_dir)
-    desktop_dir.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(source_plugin, desktop_dir / "plugin.js")
-    if backend_dir.exists():
-        shutil.rmtree(backend_dir)
-    shutil.copytree(
-        source_backend,
-        backend_dir,
-        ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "*.pyo", "*.pyd"),
-    )
+    try:
+        if desktop_dir.exists():
+            shutil.rmtree(desktop_dir)
+        desktop_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source_plugin, desktop_dir / "plugin.js")
+        if backend_dir.exists():
+            shutil.rmtree(backend_dir)
+        shutil.copytree(
+            source_backend,
+            backend_dir,
+            ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "*.pyo", "*.pyd"),
+        )
 
-    manifest = {
-        "plugin": PLUGIN_ID,
-        "version": "0.1.0",
-        "installed_at": int(time.time()),
-        "source": str(ROOT),
-        "backup": str(backup) if backup else None,
-        "files": {
-            "desktop/plugin.js": sha256(desktop_dir / "plugin.js"),
-            "backend/plugin.yaml": sha256(backend_dir / "plugin.yaml"),
-            "backend/dashboard/manifest.json": sha256(backend_dir / "dashboard" / "manifest.json"),
-            "backend/dashboard/plugin_api.py": sha256(backend_dir / "dashboard" / "plugin_api.py"),
-            "backend/dashboard/dock_runner.py": sha256(backend_dir / "dashboard" / "dock_runner.py"),
-        },
-    }
-    enable_result = None
-    if not copy_only:
-        result = run_hermes(home, "plugins", "enable", PLUGIN_ID)
-        enable_result = {"returncode": result.returncode, "stdout": result.stdout.strip(), "stderr": result.stderr.strip()}
-        # Windows may report an atomic replace failure after the state changed.
-        check = run_hermes(home, "plugins", "list", "--plain", "--no-bundled")
-        listing = f"{check.stdout}\n{check.stderr}"
-        if check.returncode != 0 or plugin_status(listing) != "enabled":
+        manifest = {
+            "plugin": PLUGIN_ID,
+            "version": VERSION,
+            "installed_at": int(time.time()),
+            "source": str(ROOT),
+            "backup": str(backup) if backup else None,
+            "files": {
+                "desktop/plugin.js": sha256(desktop_dir / "plugin.js"),
+                "backend/plugin.yaml": sha256(backend_dir / "plugin.yaml"),
+                "backend/dashboard/manifest.json": sha256(backend_dir / "dashboard" / "manifest.json"),
+                "backend/dashboard/plugin_api.py": sha256(backend_dir / "dashboard" / "plugin_api.py"),
+                "backend/dashboard/dock_runner.py": sha256(backend_dir / "dashboard" / "dock_runner.py"),
+            },
+        }
+        enable_result = None
+        if not copy_only:
+            result = run_hermes(home, "plugins", "enable", PLUGIN_ID)
+            enable_result = {"returncode": result.returncode, "stdout": result.stdout.strip(), "stderr": result.stderr.strip()}
+            # Windows may report an atomic replace failure after the state changed.
+            check = run_hermes(home, "plugins", "list", "--plain", "--no-bundled")
+            listing = f"{check.stdout}\n{check.stderr}"
+            if check.returncode != 0 or plugin_status(listing) != "enabled":
+                raise RuntimeError("Hermes did not confirm backend enablement")
+
+        manifest["enable_result"] = enable_result
+        (backend_dir / "install-manifest.json").write_text(
+            json.dumps(manifest, indent=2) + "\n", encoding="utf-8"
+        )
+        return manifest
+    except Exception as exc:
+        try:
+            restore_installation(backup, desktop_dir, backend_dir)
+        except Exception as rollback_exc:
             raise RuntimeError(
-                "Files were installed but Hermes did not confirm backend enablement. "
-                f"Run: HERMES_HOME={home} hermes plugins enable {PLUGIN_ID}"
-            )
-
-    manifest["enable_result"] = enable_result
-    (backend_dir / "install-manifest.json").write_text(
-        json.dumps(manifest, indent=2) + "\n", encoding="utf-8"
-    )
-    return manifest
+                f"Installation failed and automatic rollback also failed; preserved backup: {backup}"
+            ) from rollback_exc
+        raise RuntimeError(f"Installation failed; previous files restored: {exc}") from exc
 
 
 def main() -> int:

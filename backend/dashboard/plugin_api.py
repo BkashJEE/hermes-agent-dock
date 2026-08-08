@@ -6,6 +6,8 @@ shell, and exposes a privacy-reduced view of the optional achievements plugin.
 """
 from __future__ import annotations
 
+import base64
+import binascii
 import json
 import os
 import re
@@ -20,7 +22,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, Field, StrictBool, field_validator
 
 try:
     from hermes_constants import get_hermes_home
@@ -36,8 +38,13 @@ except ImportError:  # pragma: no cover - only for source-tree linting
 
 router = APIRouter()
 
+PLUGIN_VERSION = "0.2.0"
 MAX_MESSAGE_CHARS = 12_000
 MAX_RESPONSE_CHARS = 120_000
+MAX_IMAGE_ATTACHMENTS = 4
+MAX_IMAGE_BYTES = 10 * 1024 * 1024
+MAX_IMAGE_TOTAL_BYTES = 25 * 1024 * 1024
+MAX_IMAGE_DATA_URL_CHARS = ((MAX_IMAGE_BYTES + 2) // 3) * 4 + 128
 MAX_CONCURRENT_JOBS = 4
 JOB_TIMEOUT_SECONDS = 15 * 60
 CATALOG_TIMEOUT_SECONDS = 60
@@ -58,6 +65,41 @@ _JOBS_LOCK = threading.RLock()
 _CATALOG_LOCK = threading.RLock()
 
 
+class ImageAttachment(BaseModel):
+    name: str
+    mime_type: str
+    data_url: str
+
+    @field_validator("name", mode="before")
+    @classmethod
+    def normalize_name(cls, value: Any) -> str:
+        if not isinstance(value, str):
+            raise ValueError("Image name must be a string")
+        name = Path(value.strip()).name[:180]
+        if not name:
+            raise ValueError("Image name is empty")
+        return name
+
+    @field_validator("mime_type", mode="before")
+    @classmethod
+    def normalize_mime_type(cls, value: Any) -> str:
+        if not isinstance(value, str):
+            raise ValueError("Image MIME type must be a string")
+        mime_type = value.strip().lower()
+        if not mime_type.startswith("image/") or len(mime_type) > 80:
+            raise ValueError("Upload payload must be an image")
+        return mime_type
+
+    @field_validator("data_url", mode="before")
+    @classmethod
+    def bound_data_url(cls, value: Any) -> str:
+        if not isinstance(value, str):
+            raise ValueError("Image data must be a string")
+        if len(value) > MAX_IMAGE_DATA_URL_CHARS:
+            raise ValueError(f"Image exceeds the {MAX_IMAGE_BYTES // (1024 * 1024)} MB cap")
+        return value
+
+
 class SendRequest(BaseModel):
     profile: str
     model: str | None = None
@@ -67,7 +109,8 @@ class SendRequest(BaseModel):
     session_id: str | None = None
     reasoning_effort: str | None = "none"
     fast: bool = False
-    assign_task: bool = False
+    assign_task: StrictBool = False
+    images: list[ImageAttachment] = Field(default_factory=list)
 
     @field_validator("fast", "assign_task", mode="before")
     @classmethod
@@ -83,10 +126,26 @@ class SendRequest(BaseModel):
             raise ValueError("message must be a string")
         if len(value) > MAX_MESSAGE_CHARS:
             raise ValueError(f"Message exceeds {MAX_MESSAGE_CHARS} characters")
-        normalized = value.strip()
-        if not normalized:
-            raise ValueError("Message is empty")
-        return normalized
+        return value.strip()
+
+    @field_validator("images", mode="before")
+    @classmethod
+    def bound_image_count(cls, value: Any) -> Any:
+        if value is None:
+            return []
+        if not isinstance(value, list):
+            raise ValueError("Images must be a list")
+        if len(value) > MAX_IMAGE_ATTACHMENTS:
+            raise ValueError(f"At most {MAX_IMAGE_ATTACHMENTS} images can be attached")
+        return value
+
+
+# Dashboard plugins can be loaded through importlib without first being added
+# to sys.modules. Resolve the postponed nested-model annotation explicitly so
+# Pydantic behaves identically under the Desktop loader and the test harness.
+SendRequest.model_rebuild(
+    _types_namespace={"ImageAttachment": ImageAttachment, "StrictBool": StrictBool}
+)
 
 
 def _root_home() -> Path:
@@ -146,6 +205,69 @@ def _profile_home(profile: str) -> Path:
     # The profile name has already passed PROFILE_RE and came from the
     # installed profile inventory, so it cannot escape the profiles directory.
     return _root_home() / "profiles" / selected["name"]
+
+
+_IMAGE_MAGIC: tuple[tuple[bytes, str], ...] = (
+    (b"\x89PNG\r\n\x1a\n", ".png"),
+    (b"\xff\xd8\xff", ".jpg"),
+    (b"GIF87a", ".gif"),
+    (b"GIF89a", ".gif"),
+    (b"BM", ".bmp"),
+)
+
+
+def _image_extension(data: bytes) -> str | None:
+    head = data[:16]
+    if head.startswith(b"RIFF") and head[8:12] == b"WEBP":
+        return ".webp"
+    for signature, extension in _IMAGE_MAGIC:
+        if head.startswith(signature):
+            return extension
+    return None
+
+
+def _decode_image_attachment(attachment: ImageAttachment) -> tuple[bytes, str]:
+    header, separator, encoded = attachment.data_url.partition(",")
+    if not separator or not header.lower().startswith("data:image/") or ";base64" not in header.lower():
+        raise ValueError("Image data must be a base64 data URL")
+    header_mime = header[5:].split(";", 1)[0].strip().lower()
+    if header_mime != attachment.mime_type:
+        raise ValueError("Image MIME type does not match its data URL")
+    try:
+        data = base64.b64decode(encoded, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise ValueError("Image data is not valid base64") from exc
+    if not data:
+        raise ValueError("Image is empty")
+    if len(data) > MAX_IMAGE_BYTES:
+        raise ValueError(f"Image exceeds the {MAX_IMAGE_BYTES // (1024 * 1024)} MB cap")
+    extension = _image_extension(data)
+    if extension is None:
+        raise ValueError("Unsupported image type")
+    return data, extension
+
+
+def _materialize_job_images(profile: str, attachments: list[ImageAttachment], job_id: str) -> tuple[list[Path], Path | None]:
+    if not attachments:
+        return [], None
+    decoded = [_decode_image_attachment(attachment) for attachment in attachments]
+    if sum(len(data) for data, _ in decoded) > MAX_IMAGE_TOTAL_BYTES:
+        raise ValueError(f"Attached images exceed the {MAX_IMAGE_TOTAL_BYTES // (1024 * 1024)} MB total cap")
+
+    root = _profile_home(profile).resolve() / "images" / "agent-dock"
+    job_dir = root / job_id
+    paths: list[Path] = []
+    try:
+        job_dir.mkdir(parents=True, exist_ok=False)
+        for index, (data, extension) in enumerate(decoded, start=1):
+            path = job_dir / f"image-{index}{extension}"
+            with path.open("xb") as handle:
+                handle.write(data)
+            paths.append(path)
+    except Exception:
+        shutil.rmtree(job_dir, ignore_errors=True)
+        raise
+    return paths, job_dir
 
 
 def _runner_path() -> Path:
@@ -322,7 +444,7 @@ def _provider_row(catalog: dict[str, Any], provider: str) -> dict[str, Any] | No
 def _validate_request(request: SendRequest) -> dict[str, str]:
     profile = _normalize_profile(request.profile)
     message = request.message.strip()
-    if not message:
+    if not message and not request.images:
         raise ValueError("Message is empty")
     if len(message) > MAX_MESSAGE_CHARS:
         raise ValueError(f"Message exceeds {MAX_MESSAGE_CHARS} characters")
@@ -426,7 +548,7 @@ def _trim(value: str, limit: int = MAX_RESPONSE_CHARS) -> str:
     return value[:limit] + "\n\n[response truncated by Agent Dock]"
 
 
-def _runner_payload(request: SendRequest) -> str:
+def _runner_payload(request: SendRequest, image_paths: list[Path] | None = None) -> str:
     payload = {
         "message": request.message,
         "model": (request.model or "").strip() or None,
@@ -434,6 +556,7 @@ def _runner_payload(request: SendRequest) -> str:
         "session_id": request.session_id,
         "reasoning_effort": request.reasoning_effort or "none",
         "fast": bool(request.fast),
+        "images": [str(path) for path in image_paths or []],
     }
     return json.dumps(payload, ensure_ascii=False)
 
@@ -499,6 +622,7 @@ def _terminate_process(process: subprocess.Popen[str] | None, platform: str | No
 
 def _run_job(job_id: str, request: SendRequest) -> None:
     process: subprocess.Popen[str] | None = None
+    image_dir: Path | None = None
     with _JOBS_LOCK:
         job = _JOBS.get(job_id)
         if not job or job["status"] == "cancelled":
@@ -508,6 +632,7 @@ def _run_job(job_id: str, request: SendRequest) -> None:
 
     try:
         command = _build_command(request)
+        image_paths, image_dir = _materialize_job_images(request.profile, request.images, job_id)
         child_env = _catalog_environment(request.profile)
         popen_kwargs: dict[str, Any] = {
             "args": command,
@@ -541,7 +666,9 @@ def _run_job(job_id: str, request: SendRequest) -> None:
             return
 
         try:
-            stdout, stderr = process.communicate(input=_runner_payload(request), timeout=JOB_TIMEOUT_SECONDS)
+            stdout, stderr = process.communicate(
+                input=_runner_payload(request, image_paths), timeout=JOB_TIMEOUT_SECONDS
+            )
         except subprocess.TimeoutExpired:
             _terminate_process(process)
             raise RuntimeError("Agent session exceeded the 15 minute timeout")
@@ -562,8 +689,12 @@ def _run_job(job_id: str, request: SendRequest) -> None:
         _settle_job_kanban(job_id, "done", response or "Agent returned no response text")
         _publish_job_success(job_id)
     except Exception as exc:
-        message = str(exc)
-        if "Agent session failed:" not in message and "timeout" not in message.lower():
+        message = f"Image attachment rejected: {exc}" if request.images and isinstance(exc, ValueError) else str(exc)
+        if (
+            "Agent session failed:" not in message
+            and "Image attachment rejected:" not in message
+            and "timeout" not in message.lower()
+        ):
             message = "Agent session could not start. Check the selected profile and Hermes logs."
         with _JOBS_LOCK:
             settle_error = bool(_JOBS.get(job_id) and _JOBS[job_id]["status"] != "cancelled")
@@ -574,6 +705,8 @@ def _run_job(job_id: str, request: SendRequest) -> None:
             if job and job["status"] != "cancelled":
                 job.update({"status": "error", "error": message[:500], "finished_at": int(time.time())})
     finally:
+        if image_dir is not None:
+            shutil.rmtree(image_dir, ignore_errors=True)
         with _JOBS_LOCK:
             job = _JOBS.get(job_id)
             if job:
@@ -582,7 +715,7 @@ def _run_job(job_id: str, request: SendRequest) -> None:
 
 @router.get("/health")
 async def health() -> dict[str, Any]:
-    return {"ok": True, "service": "hermes-agent-dock", "version": "0.1.0"}
+    return {"ok": True, "service": "hermes-agent-dock", "version": PLUGIN_VERSION}
 
 
 @router.get("/profiles")
@@ -596,10 +729,13 @@ async def profiles() -> dict[str, Any]:
         "count": len(rows),
         "capabilities": {
             "idempotent_submit": True,
-            "model_override": True,
+            "model_override": False,
             "reasoning": True,
             "fast": True,
             "model_catalog": True,
+            "image_upload": True,
+            "max_images": MAX_IMAGE_ATTACHMENTS,
+            "max_image_bytes": MAX_IMAGE_BYTES,
             "kanban_assignment": True,
             "kanban_board": KANBAN_BOARD,
         },
@@ -675,6 +811,7 @@ def create_job(request: SendRequest) -> dict[str, Any]:
             "kanban_task_id": kanban_task_id,
             "kanban_board": KANBAN_BOARD if kanban_task_id else None,
             "kanban_error": None,
+            "image_count": len(request.images),
         }
         if request_key:
             _REQUEST_JOBS[request_key] = job_id

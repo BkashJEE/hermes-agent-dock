@@ -2,14 +2,14 @@
 
 ## Main goal
 
-Give a Hermes Desktop user a fast, direct route to any configured specialist profile without waiting for the active orchestrator. The interface is a compact native right-sidebar contribution that participates in workspace reflow and the host pane stack.
+Give a Hermes Desktop user a fast, direct route to any configured specialist profile without waiting for the active orchestrator. The Dock is an on-demand floating card by default, with a visible **Dock**/**Undock** control that switches between two supported public `PANES_AREA` contributions. The selected mode persists in plugin-scoped storage; only the docked mode occupies workspace height and participates in native workspace reflow.
 
 ## Acceptance evidence
 
 1. A disk desktop plugin loads without modifying Hermes core.
-2. The widget uses the public `PANES_AREA` contribution with `data: { placement: 'right' }`, opens above Files, preserves Hermes's native vertical and horizontal dividers, reflows the workspace, and remains keyboard-accessible.
+2. The widget uses only the public `PANES_AREA` contribution. Its default mode is an explicit floating card with `data: { placement: 'floating', anchor: 'top-right', width: '380px', height: '540px', uncloseable: true }`; the visible **Dock**/**Undock** control disposes and re-registers the contribution as either floating or the supported docked `data: { placement: 'bottom', dock: { pane: 'workspace', pos: 'bottom' }, height: '42vh', minHeight: '18rem', maxHeight: '70vh', uncloseable: true }`. The selected mode persists, floating mode does not alter workspace geometry, and docked mode preserves the native divider, reflows Browser and the main workspace, leaves Files independent, remains keyboard-accessible, and keeps the message composer reachable at its compact limit.
 3. The backend enumerates actual Hermes profiles rather than hard-coding Dad's agents, and the compact dropdown exposes every discovered profile without horizontal clipping.
-4. A user can select a profile and one of the models already configured for that profile's available providers, start a direct session, receive its final response in the Dock, and continue using the returned session ID.
+4. A user can select a profile, start from the model saved during that profile's Hermes setup, choose another model that Hermes reports as available through the same configured/authenticated provider, start a direct session, receive its final response in the Dock, and continue using the returned session ID. The Dock never expands unrelated providers into a global catalog.
 5. A user can switch to another profile and start a second job while the first profile keeps working; jobs, drafts, histories, sessions, cancellation, and completion notifications remain profile-scoped.
 6. The implementation launches a fixed runner argv with `shell=False`, sends exact JSON over stdin, validates profile/provider/model/session inputs, and returns bounded sanitized diagnostics.
 7. Normal conversation never creates a Kanban card.
@@ -22,6 +22,9 @@ Give a Hermes Desktop user a fast, direct route to any configured specialist pro
 14. Every new conversation bubble persists and displays the viewer's local date, time to the second, and timezone. Legacy messages without a stored timestamp are labeled unavailable rather than assigned fabricated history.
 15. Transient status-read failures retain active-job identity and continue reconciliation; the UI clears a reservation only after a terminal response or structured not-found result.
 16. Lost POST responses reconcile through the stable `request_id`; redaction failures return generic local-log guidance rather than raw runner diagnostics.
+17. A user can attach up to four signature-validated PNG/JPEG/GIF/WebP/BMP images (10 MB each, 25 MB total). Bytes remain ephemeral, runner paths stay under the selected profile's `images/agent-dock` directory, and cleanup runs after success, error, timeout, or cancellation.
+18. The selected agent row and collapsed launcher render the compact 20 px **Working** orb only while one or more real jobs are active. Terminal/idle states remove it; reduced-motion users receive a static frame; hidden/offscreen instances stop animating.
+19. On a host exposing the public `pet.actions` contribution area, a plain primary click on the in-window pet invokes the same idempotent Dock toggle as the native launchers. Pet drag and Shift-click pop-out remain host-owned, and older hosts ignore the optional pet contribution while preserving status-bar and command-palette access.
 
 ## Supported specialist routing
 
@@ -34,12 +37,15 @@ Give a Hermes Desktop user a fast, direct route to any configured specialist pro
 
 ## Widget information architecture
 
-- Closed: the persistent native status-bar launcher shows Agent Dock and profile-keyed activity.
-- Open header: Agent Dock, selected profile, busy/ready state, and mute.
+- Closed: plain-clicking the in-window pet opens Agent Dock when `pet.actions` is supported; the persistent native status-bar launcher continues to show Agent Dock and profile-keyed activity on every host.
+- Floating mode (default): when Agent Dock is opened, the card appears at the host-supported top-right anchor without changing workspace geometry. Its header exposes **Dock**; in docked mode the same control reads **Undock** and the bottom tile reflows Browser and the main workspace while Files remains independent.
+- Mode persistence: `dock-mode` is stored through the plugin's namespaced `ctx.storage`; a close/reopen keeps the user's floating or docked choice.
+- Open header: Agent Dock, selected profile, busy/ready state, mode control, and mute.
+- Working indicator: one compact, theme-aware six-color 20 px Rubik/solving canvas tied to actual active-job state; idle dots stay unchanged and the status launcher retains the concurrent-agent count.
 - Agent picker: compact dropdown containing every discovered profile.
-- Model picker: per-profile session override limited to model IDs already configured for that profile's provider; “Profile default” keeps the profile's own model.
-- Conversation: compact user/assistant bubbles with persistent local date/time metadata; final responses only in v0.1.
-- Composer: multiline input, Enter sends, Shift+Enter inserts a newline, explicit **Assign task** opt-in, and cancel while running.
+- Model selector: compact per-profile control that starts on the saved model, offers only alternatives from that profile's configured/authenticated Hermes provider, persists the Dock choice per profile, and shows a deterministic **Workload tier** for each model. Unknown provider models remain selectable by their authoritative Hermes IDs and capability metadata.
+- Conversation: compact user/assistant bubbles with persistent local date/time metadata; final responses only in v0.2.
+- Composer: multiline input, compact **Attach image** text control and previews, Enter sends, Shift+Enter inserts a newline, explicit **Assign task** opt-in, and cancel while running.
 - Parallel work: each profile owns its draft and active job; switching profiles never cancels or blocks another profile, and host notifications announce completion or failure.
 - Achievement notification: a newly unlocked achievement appears as a temporary tier-aware flashcard; historical achievement browsing stays in the standalone Achievements page.
 
@@ -56,14 +62,14 @@ All surfaces use Hermes theme variables; tier colors are created with `color-mix
 ## Data boundaries
 
 - Messages and responses live in Hermes sessions owned by the selected profile.
-- The dock keeps only per-profile session IDs, local UI history with message timestamps, mute state, and the last-seen achievement timestamp in plugin storage. The backend retains at most 200 terminal job records for up to one hour to support bounded retry idempotency.
+- The dock keeps only per-profile session IDs, local UI history with message timestamps and attachment metadata, mode (`dock-mode`), mute state, and the last-seen achievement timestamp in plugin storage. Base64 image bytes are never persisted there. The backend retains at most 200 terminal job records for up to one hour to support bounded retry idempotency.
 - Achievement integration reads only the local `hermes-achievements/scan_snapshot.json` if present.
 - Explicitly assigned messages also create a linked local Hermes Kanban card on `executive-organization`.
 - No telemetry, analytics, or independent external service is added by the plugin itself; selected profiles retain their configured model-provider behavior and costs.
 
-## Non-goals for v0.1
+## Non-goals for v0.2
 
-- Floating overlay or OS-level always-on-top window.
+- OS-level always-on-top window or private DOM overlay/interception.
 - Streaming partial tokens.
-- Files, voice input, public posting, payments, or automatic approvals.
+- Non-image files, voice input, public posting, payments, or automatic approvals.
 - Automatic task inference from ordinary conversation or automatic completion without Dad/CEO verification.

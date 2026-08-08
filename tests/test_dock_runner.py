@@ -3,7 +3,9 @@ from __future__ import annotations
 import importlib.util
 import io
 import json
+import os
 import sys
+import tempfile
 import types
 import unittest
 from pathlib import Path
@@ -19,6 +21,70 @@ SPEC.loader.exec_module(runner)
 
 
 class DockRunnerTests(unittest.TestCase):
+    def test_catalog_contains_only_the_profile_provider_with_available_models(self):
+        context = types.SimpleNamespace(current_provider="custom:local", current_model="qwen-profile")
+        payload = {
+            "providers": [
+                {
+                    "slug": "custom:local",
+                    "name": "Local Qwen",
+                    "models": ["qwen-fast", "qwen-profile"],
+                    "capabilities": {
+                        "qwen-fast": {"reasoning": False, "fast": True},
+                        "qwen-profile": {"reasoning": True, "fast": False},
+                    },
+                },
+                {"slug": "openrouter", "models": ["unrelated/model"]},
+            ]
+        }
+        build_calls = []
+
+        def build_models_payload(received_context, **kwargs):
+            build_calls.append((received_context, kwargs))
+            return payload
+
+        with patch.dict(
+            sys.modules,
+            {
+                "hermes_cli.inventory": types.SimpleNamespace(
+                    load_picker_context=lambda: context,
+                    build_models_payload=build_models_payload,
+                ),
+            },
+        ):
+            catalog = runner._catalog()
+        self.assertEqual(catalog["model"], "qwen-profile")
+        self.assertEqual(catalog["provider"], "custom:local")
+        self.assertEqual(len(catalog["providers"]), 1)
+        self.assertEqual(catalog["providers"][0]["models"], ["qwen-fast", "qwen-profile"])
+        self.assertEqual(catalog["providers"][0]["name"], "Local Qwen")
+        self.assertEqual(catalog["providers"][0]["capabilities"]["qwen-fast"]["fast"], True)
+        self.assertEqual(build_calls[0][0], context)
+        self.assertEqual(
+            build_calls[0][1],
+            {
+                "explicit_only": True,
+                "capabilities": True,
+                "for_picker": True,
+                "probe_custom_providers": False,
+                "probe_current_custom_provider": True,
+            },
+        )
+
+    def test_catalog_keeps_saved_model_when_provider_discovery_is_unavailable(self):
+        context = types.SimpleNamespace(current_provider="custom:offline", current_model="saved-model")
+        with patch.dict(
+            sys.modules,
+            {
+                "hermes_cli.inventory": types.SimpleNamespace(
+                    load_picker_context=lambda: context,
+                    build_models_payload=lambda *_args, **_kwargs: {"providers": []},
+                ),
+            },
+        ):
+            catalog = runner._catalog()
+        self.assertEqual(catalog["providers"][0]["models"], ["saved-model"])
+
     def test_catalog_mode_emits_machine_readable_json(self):
         output = io.StringIO()
         with patch.object(runner, "_catalog", return_value={"providers": []}), patch.object(
@@ -66,8 +132,9 @@ class DockRunnerTests(unittest.TestCase):
                 self.agent = types.SimpleNamespace(session_id="20260805_010203_reply")
                 self._session_db = None
 
-            def chat(self, message):
+            def chat(self, message, images=None):
                 self.seen = message
+                self.seen_images = images
                 return "Jarvis replied"
 
         cli_module = types.SimpleNamespace(HermesCLI=FakeCLI)
@@ -83,6 +150,42 @@ class DockRunnerTests(unittest.TestCase):
             response, session_id = runner._quiet_chat(request)
         self.assertEqual(response, "Jarvis replied")
         self.assertEqual(session_id, "20260805_010203_reply")
+
+    def test_quiet_chat_passes_only_profile_scoped_image_paths(self):
+        instances = []
+
+        class FakeCLI:
+            def __init__(self, **_kwargs):
+                self.agent = types.SimpleNamespace(session_id="20260805_010203_image")
+                self._session_db = None
+                instances.append(self)
+
+            def chat(self, message, images=None):
+                self.seen_message = message
+                self.seen_images = images
+                return "image received"
+
+        cli_module = types.SimpleNamespace(HermesCLI=FakeCLI)
+        constants_module = types.SimpleNamespace(parse_reasoning_effort=lambda value: value)
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            image = home / "images" / "agent-dock" / "job" / "image-1.png"
+            image.parent.mkdir(parents=True)
+            image.write_bytes(b"\x89PNG\r\n\x1a\ncontent")
+            request = {"message": "", "images": [str(image)], "reasoning_effort": "none", "fast": False}
+            with patch.dict(sys.modules, {"cli": cli_module, "hermes_constants": constants_module}), patch.dict(
+                os.environ, {"HERMES_HOME": str(home)}
+            ):
+                response, _session_id = runner._quiet_chat(request)
+            self.assertEqual(response, "image received")
+            self.assertEqual(instances[0].seen_message, "Please analyze the attached image or images.")
+            self.assertEqual(instances[0].seen_images, [image.resolve()])
+
+            outside = home / "outside.png"
+            outside.write_bytes(b"\x89PNG\r\n\x1a\ncontent")
+            with patch.dict(os.environ, {"HERMES_HOME": str(home)}):
+                with self.assertRaisesRegex(ValueError, "escaped"):
+                    runner._request_image_paths({"images": [str(outside)]})
 
     def test_diagnostic_tail_keeps_last_actionable_line(self):
         self.assertEqual(

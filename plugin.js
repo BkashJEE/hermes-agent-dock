@@ -10,6 +10,11 @@ import {
   Button,
   cn,
   Codicon,
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
   haptic,
   host,
   PALETTE_AREA,
@@ -28,13 +33,23 @@ import { jsx, jsxs } from 'react/jsx-runtime'
 import { useEffect, useMemo, useRef, useState } from 'react'
 
 const ID = 'hermes-agent-dock'
+// Kept as a string contract so this plugin still loads on older Hermes builds
+// that predate the public SDK export. Supporting hosts resolve this area; older
+// hosts safely retain the status-bar and command-palette launchers.
+const PET_ACTIONS_AREA = 'pet.actions'
 const MAX_LOCAL_MESSAGES = 30
 let rest
 let storage
 let dockPaneDisposer = null
 const $dockOpen = atom(false)
+const $dockMode = atom('floating')
 
 // STATE_HELPERS_START — dependency-free logic exercised by tests/test_dock_state.mjs.
+const DEFAULT_DOCK_MODE = 'floating'
+const DOCK_MODES = Object.freeze(['floating', 'docked'])
+const MAX_IMAGE_ATTACHMENTS = 4
+const MAX_IMAGE_BYTES = 10 * 1024 * 1024
+const IMAGE_MIME_TYPES = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp', 'image/bmp'])
 const REASONING_EFFORTS = Object.freeze([
   { value: 'minimal', label: 'Minimal' },
   { value: 'low', label: 'Low' },
@@ -45,8 +60,65 @@ const REASONING_EFFORTS = Object.freeze([
   { value: 'ultra', label: 'Ultra' }
 ])
 const VALID_REASONING_EFFORTS = new Set(REASONING_EFFORTS.map(option => option.value))
+const REASONING_SLIDER_VALUES = Object.freeze(['low', 'medium', 'high'])
+const WORKLOAD_TIER_LABELS = Object.freeze({ low: 'Low', medium: 'Medium', high: 'High' })
+const MODEL_WORKLOAD_TIERS = Object.freeze({
+  'gpt-5.6-sol': 'high',
+  'gpt-5.6-sol-pro': 'high',
+  'gpt-5.6-terra-pro': 'high',
+  'gpt-5.6-terra': 'medium',
+  'gpt-5.6-luna-pro': 'medium',
+  'gpt-5.5': 'medium',
+  'gpt-5.4': 'medium',
+  'gpt-5.6-luna': 'low',
+  'gpt-5.4-mini': 'low',
+  'gpt-5.3-codex-spark': 'low'
+})
+const MODEL_DISPLAY_LABELS = Object.freeze({
+  'gpt-5.6-sol': 'GPT 5.6 Sol',
+  'gpt-5.6-sol-pro': 'GPT 5.6 Sol Pro',
+  'gpt-5.6-terra-pro': 'GPT 5.6 Terra Pro',
+  'gpt-5.6-terra': 'GPT 5.6 Terra',
+  'gpt-5.6-luna-pro': 'GPT 5.6 Luna Pro',
+  'gpt-5.5': 'GPT 5.5',
+  'gpt-5.4': 'GPT 5.4',
+  'gpt-5.6-luna': 'GPT 5.6 Luna',
+  'gpt-5.4-mini': 'GPT 5.4 Mini',
+  'gpt-5.3-codex-spark': 'GPT 5.3 Codex Spark'
+})
 const ACTIVE_JOB_STATUSES = new Set(['starting', 'queued', 'running', 'finalizing', 'cancelling'])
 const STARTING_JOB_TTL_MS = 60_000
+
+function normalizeDockMode(mode) {
+  return DOCK_MODES.includes(mode) ? mode : DEFAULT_DOCK_MODE
+}
+
+function nextDockMode(mode) {
+  return normalizeDockMode(mode) === 'floating' ? 'docked' : 'floating'
+}
+
+function dockModeAction(mode) {
+  return normalizeDockMode(mode) === 'floating' ? 'Dock' : 'Undock'
+}
+
+function dockPaneData(mode) {
+  return normalizeDockMode(mode) === 'floating'
+    ? {
+        placement: 'floating',
+        anchor: 'top-right',
+        width: '380px',
+        height: '540px',
+        uncloseable: true
+      }
+    : {
+        placement: 'bottom',
+        dock: { pane: 'workspace', pos: 'bottom' },
+        height: '42vh',
+        minHeight: '18rem',
+        maxHeight: '70vh',
+        uncloseable: true
+      }
+}
 
 function profileDisplayLabel(rawProfile) {
   const raw = String(rawProfile ?? '')
@@ -59,6 +131,40 @@ function profileDisplayLabel(rawProfile) {
 
 function modelOptionKey(provider, model) {
   return `${encodeURIComponent(provider)}::${encodeURIComponent(model)}`
+}
+
+function modelPresentation(model, capabilities = {}) {
+  const raw = String(model ?? '').trim()
+  const normalized = raw.toLowerCase()
+  const tier = MODEL_WORKLOAD_TIERS[normalized] || (capabilities.reasoning === true ? 'medium' : 'low')
+  return {
+    label: MODEL_DISPLAY_LABELS[normalized] || raw || 'Unknown model',
+    tier,
+    tierLabel: WORKLOAD_TIER_LABELS[tier]
+  }
+}
+
+function compactModelLabel(label) {
+  const normalized = String(label ?? '').trim()
+  return normalized.replace(/^GPT\s+/i, '') || 'No model'
+}
+
+function migrateSavedModelSelections(savedModels, savedProviders = {}) {
+  if (!savedModels || typeof savedModels !== 'object' || Array.isArray(savedModels)) return {}
+  const providers = savedProviders && typeof savedProviders === 'object' && !Array.isArray(savedProviders)
+    ? savedProviders
+    : {}
+  return Object.fromEntries(Object.entries(savedModels).flatMap(([profile, selection]) => {
+    if (typeof selection === 'string') {
+      const model = selection.trim()
+      if (!model) return []
+      return [[profile, { provider: String(providers[profile] ?? '').trim(), model }]]
+    }
+    if (!selection || typeof selection !== 'object' || Array.isArray(selection)) return []
+    const model = String(selection.model ?? '').trim()
+    if (!model) return []
+    return [[profile, { provider: String(selection.provider ?? '').trim(), model }]]
+  }))
 }
 
 function modelFromEntry(entry) {
@@ -119,6 +225,17 @@ function normalizeReasoningEffort(effort) {
   return VALID_REASONING_EFFORTS.has(effort) ? effort : 'medium'
 }
 
+function reasoningEffortSliderPosition(effort) {
+  const normalized = normalizeReasoningEffort(effort)
+  if (normalized === 'minimal' || normalized === 'low') return 0
+  if (normalized === 'medium') return 1
+  return 2
+}
+
+function reasoningEffortForSliderPosition(position) {
+  return REASONING_SLIDER_VALUES[Number(position)] || 'medium'
+}
+
 function resolveModelSettings({ modelPayload, provider, model, thinking, effort, fast }) {
   const capabilities = selectedModelCapabilities(modelPayload, provider, model)
   const thinkingEnabled = thinking === true && capabilities.reasoning
@@ -131,7 +248,45 @@ function resolveModelSettings({ modelPayload, provider, model, thinking, effort,
   }
 }
 
-function buildJobPayload({ profile, provider, model, thinking, effort, fast, message, session_id, request_id, assign_task, modelPayload }) {
+function validateImageFileMetadata(file, currentCount = 0) {
+  if (currentCount >= MAX_IMAGE_ATTACHMENTS) return `Attach at most ${MAX_IMAGE_ATTACHMENTS} images.`
+  if (!IMAGE_MIME_TYPES.has(String(file?.type || '').toLowerCase())) return 'Use PNG, JPEG, GIF, WebP, or BMP images.'
+  const size = Number(file?.size)
+  if (!Number.isFinite(size) || size <= 0) return 'The selected image is empty.'
+  if (size > MAX_IMAGE_BYTES) return `Each image must be ${MAX_IMAGE_BYTES / (1024 * 1024)} MB or smaller.`
+  return null
+}
+
+function extractClipboardImageFiles(clipboard) {
+  const images = []
+  const seen = new Set()
+  const push = file => {
+    if (!file || !String(file.type || '').toLowerCase().startsWith('image/')) return
+    const key = [file.name || '', file.size || 0, file.type || '', file.lastModified || 0].join(':')
+    if (seen.has(key)) return
+    seen.add(key)
+    images.push(file)
+  }
+
+  for (const item of Array.from(clipboard?.items || [])) {
+    if (item?.kind === 'file' && String(item.type || '').toLowerCase().startsWith('image/')) {
+      push(item.getAsFile?.())
+    }
+  }
+
+  // Chromium commonly mirrors one clipboard image in both collections.
+  if (!images.length) {
+    for (const file of Array.from(clipboard?.files || [])) push(file)
+  }
+  return images
+}
+
+function shouldConsumeClipboardPaste(clipboard, images, currentCount = 0) {
+  if (String(clipboard?.getData?.('text/plain') || '')) return false
+  return images.some(image => !validateImageFileMetadata(image, currentCount))
+}
+
+function buildJobPayload({ profile, provider, model, thinking, effort, fast, message, images, session_id, request_id, assign_task, modelPayload }) {
   const settings = resolveModelSettings({ modelPayload, provider, model, thinking, effort, fast })
   return {
     profile: String(profile ?? '').trim(),
@@ -140,6 +295,9 @@ function buildJobPayload({ profile, provider, model, thinking, effort, fast, mes
     reasoning_effort: settings.reasoning_effort,
     fast: settings.fast_enabled,
     message,
+    images: Array.isArray(images)
+      ? images.map(image => ({ name: image.name, mime_type: image.mime_type, data_url: image.data_url }))
+      : [],
     session_id: session_id ?? null,
     request_id: request_id ?? null,
     assign_task: assign_task === true
@@ -307,6 +465,19 @@ function makeRequestId() {
   return globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(36).slice(2)}`
 }
 
+function readImageAsDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onerror = () => reject(new Error('The selected image could not be read.'))
+    reader.onload = () => {
+      const dataUrl = String(reader.result || '')
+      if (!dataUrl.startsWith('data:image/')) reject(new Error('The selected file is not a readable image.'))
+      else resolve(dataUrl)
+    }
+    reader.readAsDataURL(file)
+  })
+}
+
 function HermesMark({ compact = false }) {
   return jsx('span', {
     'aria-hidden': true,
@@ -429,6 +600,303 @@ function AchievementCard({ item, compact = false }) {
   })
 }
 
+/*
+ * Rubik working orb adapted from the 20 px `solving` painter in
+ * thinking-orbs 0.2.0 by Jakub Antalik.
+ * Source: https://github.com/JakubAntalik/thinking-orbs
+ * Copyright (c) 2026 Jakub Antalik
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to inclusion of this copyright and permission notice.
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO MERCHANTABILITY AND FITNESS FOR A
+ * PARTICULAR PURPOSE. See THIRD_PARTY_NOTICES.md for the complete MIT license.
+ *
+ * The 20 px solving preset is intentionally tuned, not scaled down from 64 px.
+ * thinking-orbs paints this geometry monochrome; the six-color palette below is
+ * a local Agent Dock adaptation, with one stable color per signed dominant axis.
+ */
+const RUBIK_SOLVING_20_PRESET = Object.freeze({
+  latRings: 4,
+  lonDensity: 12,
+  moveCount: 14,
+  speed: 1.95,
+  rBase: 0.6 * 1.9,
+  rDepth: 1.7 * 1.9,
+  rActive: 0.3 * 1.9,
+  rsPow: 0.6,
+  rMin: 0.3,
+  radius: 0.82
+})
+const RUBIK_DARK_PALETTE = Object.freeze([
+  '#b8f25a',
+  '#62c7f5',
+  '#f4c15d',
+  '#f28b82',
+  '#b7a0f5',
+  '#5bd6c5'
+])
+const RUBIK_LIGHT_PALETTE = Object.freeze([
+  '#4f7417',
+  '#1f6f9f',
+  '#975c00',
+  '#a33e3e',
+  '#6546a2',
+  '#147568'
+])
+
+function rubikHash(a, b) {
+  const value = Math.sin(a * 12.9898 + b * 78.233) * 43758.5453
+  return value - Math.floor(value)
+}
+
+function rubikProject(yaw, tilt, cx, cy, radius) {
+  const sinTilt = Math.sin(tilt)
+  const cosTilt = Math.cos(tilt)
+  const sinYaw = Math.sin(yaw)
+  const cosYaw = Math.cos(yaw)
+  return (x, y, z) => {
+    const x1 = x * cosYaw + z * sinYaw
+    const z1 = -x * sinYaw + z * cosYaw
+    const y1 = y * cosTilt - z1 * sinTilt
+    const z2 = y * sinTilt + z1 * cosTilt
+    return [cx + x1 * radius, cy - y1 * radius, z2]
+  }
+}
+
+function rubikMoveAmounts(time, moveCount) {
+  const moveDuration = 0.42
+  const pauseDuration = 1.2
+  const period = 2 * moveCount * moveDuration + pauseDuration
+  const phase = time % period
+  const amount = new Array(moveCount).fill(0)
+  let active = -1
+  if (phase < 2 * moveCount * moveDuration) {
+    const move = Math.floor(phase / moveDuration)
+    const progress = (phase - move * moveDuration) / moveDuration
+    const eased = 1 - (1 - Math.min(1, progress / 0.7)) ** 3
+    if (move < moveCount) {
+      for (let index = 0; index < move; index += 1) amount[index] = 1
+      amount[move] = eased
+      active = move
+    } else {
+      const reverseMove = 2 * moveCount - 1 - move
+      for (let index = 0; index < reverseMove; index += 1) amount[index] = 1
+      amount[reverseMove] = 1 - eased
+      active = reverseMove
+    }
+  }
+  return { amount, active }
+}
+
+function rubikMoveSchedule(moveCount) {
+  const moves = []
+  for (let index = 0; index < moveCount; index += 1) {
+    const axis = Math.min(2, Math.floor(rubikHash(index, 2.3) * 3))
+    const low = -1 + 0.5 * Math.min(3, Math.floor(rubikHash(index, 5.9) * 4))
+    const direction = rubikHash(index, 7.7) < 0.5 ? 1 : -1
+    moves.push({ axis, lo: low, hi: low + 0.5, ang: direction * Math.PI / 2 })
+  }
+  return moves
+}
+
+function rubikApplyMoves(point, moves, state) {
+  let [x, y, z] = point
+  let active = false
+  for (let index = 0; index < moves.length; index += 1) {
+    if (state.amount[index] <= 0) continue
+    const move = moves[index]
+    const coordinate = move.axis === 0 ? x : move.axis === 1 ? y : z
+    if (coordinate < move.lo || coordinate >= move.hi) continue
+    if (index === state.active) active = true
+    const angle = move.ang * state.amount[index]
+    const cos = Math.cos(angle)
+    const sin = Math.sin(angle)
+    if (move.axis === 0) {
+      const nextY = y * cos - z * sin
+      z = y * sin + z * cos
+      y = nextY
+    } else if (move.axis === 1) {
+      const nextX = x * cos + z * sin
+      z = -x * sin + z * cos
+      x = nextX
+    } else {
+      const nextX = x * cos - y * sin
+      y = x * sin + y * cos
+      x = nextX
+    }
+  }
+  return [x, y, z, active]
+}
+
+function rubikOriginalAxisIndex(x, y, z) {
+  const absX = Math.abs(x)
+  const absY = Math.abs(y)
+  const absZ = Math.abs(z)
+  if (absX >= absY && absX >= absZ) return x >= 0 ? 0 : 1
+  if (absY >= absZ) return y >= 0 ? 2 : 3
+  return z >= 0 ? 4 : 5
+}
+
+function rubikCssChannel(value) {
+  const text = String(value ?? '').trim()
+  const number = Number.parseFloat(text)
+  return text.endsWith('%') ? number * 2.55 : number
+}
+
+function rubikTextColorIsLight(color) {
+  const text = String(color ?? '').trim().toLowerCase()
+  let channels = null
+  if (text.startsWith('#')) {
+    const hex = text.slice(1)
+    const expanded = hex.length === 3 || hex.length === 4
+      ? [...hex].map(channel => `${channel}${channel}`).join('')
+      : hex
+    if (/^[0-9a-f]{6,8}$/.test(expanded)) {
+      channels = [
+        Number.parseInt(expanded.slice(0, 2), 16),
+        Number.parseInt(expanded.slice(2, 4), 16),
+        Number.parseInt(expanded.slice(4, 6), 16)
+      ]
+    }
+  } else {
+    const match = text.match(/^rgba?\(([^)]+)\)$/)
+    if (match) channels = match[1].split(/[,\s/]+/).filter(Boolean).slice(0, 3).map(rubikCssChannel)
+  }
+  if (!channels || channels.length !== 3 || channels.some(channel => !Number.isFinite(channel))) return false
+  return (0.2126 * channels[0] + 0.7152 * channels[1] + 0.0722 * channels[2]) / 255 >= 0.58
+}
+
+function rubikPaletteForCanvas(canvas) {
+  const textColor = getComputedStyle(canvas).color
+  return rubikTextColorIsLight(textColor) ? RUBIK_DARK_PALETTE : RUBIK_LIGHT_PALETTE
+}
+
+function drawRubikWorkingOrb(ctx, size, time) {
+  const preset = RUBIK_SOLVING_20_PRESET
+  const radius = (size / 2) * preset.radius
+  const tilt = 0.35 + 0.1 * Math.sin(time * 0.9)
+  const project = rubikProject(time * 0.55, tilt, size / 2, size / 2, radius)
+  const radiusScale = (size / 300) ** preset.rsPow
+  const moves = rubikMoveSchedule(preset.moveCount)
+  const moveState = rubikMoveAmounts(time, preset.moveCount)
+  const palette = rubikPaletteForCanvas(ctx.canvas)
+  const dots = []
+
+  for (let ring = 0; ring <= preset.latRings; ring += 1) {
+    const latitude = -Math.PI / 2 + ring / preset.latRings * Math.PI
+    const ringRadius = Math.cos(latitude)
+    const height = Math.sin(latitude)
+    const longitudeCount = Math.max(1, Math.round(Math.abs(ringRadius) * preset.lonDensity))
+    for (let longitudeIndex = 0; longitudeIndex < longitudeCount; longitudeIndex += 1) {
+      const longitude = longitudeIndex / longitudeCount * 2 * Math.PI
+      const originalX = ringRadius * Math.cos(longitude)
+      const originalY = height
+      const originalZ = ringRadius * Math.sin(longitude)
+      const [movedX, movedY, movedZ, active] = rubikApplyMoves(
+        [originalX, originalY, originalZ],
+        moves,
+        moveState
+      )
+      const [x, y, z] = project(movedX, movedY, movedZ)
+      const depth = (z + 1) / 2
+      dots.push({
+        x,
+        y,
+        z,
+        radius: (preset.rBase + preset.rDepth * depth + (active ? preset.rActive : 0)) * radiusScale,
+        alpha: Math.min(1, 0.28 + 0.72 * depth + (active ? 0.08 : 0)),
+        color: palette[rubikOriginalAxisIndex(originalX, originalY, originalZ)]
+      })
+    }
+  }
+
+  dots.sort((a, b) => a.z - b.z)
+  for (const dot of dots) {
+    ctx.globalAlpha = dot.alpha
+    ctx.fillStyle = dot.color
+    ctx.beginPath()
+    ctx.arc(dot.x, dot.y, Math.max(preset.rMin, dot.radius), 0, Math.PI * 2)
+    ctx.fill()
+  }
+  ctx.globalAlpha = 1
+}
+
+function RubikWorkingOrb({ label = 'Agent working' }) {
+  const canvasRef = useRef(null)
+  useEffect(() => {
+    const canvas = canvasRef.current
+    if (!canvas) return undefined
+    const size = 20
+    const dpr = Math.min(2, window.devicePixelRatio || 1)
+    canvas.width = Math.round(size * dpr)
+    canvas.height = Math.round(size * dpr)
+    const context = canvas.getContext('2d')
+    if (!context) return undefined
+
+    const paintFrame = seconds => {
+      context.setTransform(dpr, 0, 0, dpr, 0, 0)
+      context.clearRect(0, 0, size, size)
+      drawRubikWorkingOrb(context, size, seconds * RUBIK_SOLVING_20_PRESET.speed)
+    }
+    if (window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) {
+      paintFrame(0.6)
+      return undefined
+    }
+
+    let animationFrame = 0
+    let running = false
+    let visible = true
+    const stop = () => {
+      running = false
+      cancelAnimationFrame(animationFrame)
+    }
+    const loop = () => {
+      paintFrame(performance.now() / 1000)
+      if (running) animationFrame = requestAnimationFrame(loop)
+    }
+    const start = () => {
+      if (running) return
+      running = true
+      animationFrame = requestAnimationFrame(loop)
+    }
+    const onVisibility = () => {
+      if (document.visibilityState === 'hidden') stop()
+      else if (visible) start()
+    }
+    const observer = typeof IntersectionObserver === 'undefined'
+      ? null
+      : new IntersectionObserver(([entry]) => {
+          visible = entry.isIntersecting
+          if (visible && document.visibilityState !== 'hidden') start()
+          else stop()
+        })
+
+    paintFrame(performance.now() / 1000)
+    observer?.observe(canvas)
+    document.addEventListener('visibilitychange', onVisibility)
+    if (!observer) start()
+    return () => {
+      stop()
+      observer?.disconnect()
+      document.removeEventListener('visibilitychange', onVisibility)
+    }
+  }, [])
+
+  return jsx('canvas', {
+    'aria-label': label,
+    className: 'block size-5 shrink-0 text-(--ui-text-secondary)',
+    'data-agent-dock-rubik-orb': 'true',
+    ref: canvasRef,
+    role: 'img',
+    style: { height: 20, width: 20 }
+  })
+}
+
 function MessageBubble({ message }) {
   const user = message.role === 'user'
   const timestamp = formatMessageTimestamp(message.created_at)
@@ -445,6 +913,12 @@ function MessageBubble({ message }) {
       ),
       children: [
         jsx('p', { children: message.text }),
+        Array.isArray(message.attachments) && message.attachments.length
+          ? jsx('p', {
+              className: 'mt-1 text-[0.62rem] text-(--ui-text-tertiary)',
+              children: `Images · ${message.attachments.map(item => item.name).join(', ')}`
+            })
+          : null,
         jsx('p', {
           className: 'mt-1 text-[0.56rem] tabular-nums tracking-[0.04em] text-(--ui-text-quaternary)',
           children: `${user
@@ -456,7 +930,7 @@ function MessageBubble({ message }) {
   })
 }
 
-function AgentDock() {
+function AgentDock({ mode = DEFAULT_DOCK_MODE, onToggleMode }) {
   const profilesQuery = useQuery({ queryKey: [ID, 'profiles'], queryFn: () => rest('/profiles'), refetchInterval: 20_000 })
   const achievementsQuery = useQuery({
     queryKey: [ID, 'achievements'],
@@ -466,14 +940,20 @@ function AgentDock() {
   const [selected, setSelected] = useState(() => storage.get('selected-profile', ''))
   const [histories, setHistories] = useState(() => storage.get('histories', {}))
   const [sessions, setSessions] = useState(() => storage.get('sessions', {}))
-  const [selectedModels, setSelectedModels] = useState(() => storage.get('selected-models', {}))
-  const [selectedProviders, setSelectedProviders] = useState(() => storage.get('selected-providers', {}))
+  const [selectedModels, setSelectedModels] = useState(() => {
+    const migrated = migrateSavedModelSelections(
+      storage.get('selected-models', {}),
+      storage.get('selected-providers', {})
+    )
+    storage.set('selected-models', migrated)
+    return migrated
+  })
   const [selectedEfforts, setSelectedEfforts] = useState(() => storage.get('selected-efforts', {}))
   const [thinkingByProfile, setThinkingByProfile] = useState(() => storage.get('thinking', {}))
   const [fastByProfile, setFastByProfile] = useState(() => storage.get('fast', {}))
-  const [modelFilter, setModelFilter] = useState('')
   const [assignTask, setAssignTask] = useState(false)
   const [drafts, setDrafts] = useState(() => storage.get('drafts', {}))
+  const [attachmentsByProfile, setAttachmentsByProfile] = useState({})
   const [activeJobs, setActiveJobs] = useState(() => {
     const stored = storage.get('active-jobs', {})
     const reconciled = pruneExpiredStartingJobs(stored)
@@ -482,14 +962,16 @@ function AgentDock() {
   })
   const [muted, setMuted] = useState(() => storage.get('muted', false))
   const [achievementToast, setAchievementToast] = useState(null)
+  const [modelMenuPanel, setModelMenuPanel] = useState('advanced')
   const scrollRef = useRef(null)
+  const imageInputRef = useRef(null)
   const notifiedJobIds = useRef(new Set())
   const activeJobsRef = useRef(activeJobs)
 
   const profiles = profilesQuery.data?.profiles || []
   const supportsIdempotentSubmit = profilesQuery.data?.capabilities?.idempotent_submit !== false
-  const supportsModelOverride = profilesQuery.data?.capabilities?.model_override === true
   const supportsModelCatalog = profilesQuery.data?.capabilities?.model_catalog === true
+  const supportsImageUpload = profilesQuery.data?.capabilities?.image_upload === true
   const supportsReasoning = profilesQuery.data?.capabilities?.reasoning === true
   const supportsFast = profilesQuery.data?.capabilities?.fast === true
   const supportsKanbanAssignment = profilesQuery.data?.capabilities?.kanban_assignment === true
@@ -503,33 +985,35 @@ function AgentDock() {
   })
   const modelPayload = modelsQuery.data || null
   const modelOptions = useMemo(() => flattenModelOptions(modelPayload), [modelPayload])
-  const filteredModelOptions = useMemo(() => {
-    const needle = modelFilter.trim().toLowerCase()
-    if (!needle) return modelOptions
-    return modelOptions.filter(option =>
-      `${option.providerName} ${option.provider} ${option.model}`.toLowerCase().includes(needle)
+  const savedModelSelection = selectedModels[currentName]
+  const configuredProvider = modelPayload?.provider || currentProfile?.provider || ''
+  const configuredModel = modelPayload?.model || currentProfile?.model || ''
+  const savedModelOption = modelOptions.find(option => (
+    option.model === savedModelSelection?.model && (
+      !savedModelSelection?.provider || option.provider === savedModelSelection.provider
     )
-  }, [modelFilter, modelOptions])
-  const modelGroups = useMemo(() => groupModelOptions(filteredModelOptions), [filteredModelOptions])
-  const selectedModel = selectedModels[currentName] || ''
-  const selectedProvider = selectedProviders[currentName] || ''
-  const selectedOption = useMemo(() => {
-    if (!selectedModel) return null
-    const matches = modelOptions.filter(option => option.model === selectedModel)
-    return matches.find(option => !selectedProvider || option.provider === selectedProvider) || (matches.length === 1 ? matches[0] : null)
-  }, [modelOptions, selectedModel, selectedProvider])
-  const effectiveModel = selectedOption?.model || modelPayload?.model || currentProfile?.model || ''
-  const effectiveProvider = selectedOption?.provider || modelPayload?.provider || currentProfile?.provider || ''
+  ))
+  const configuredModelOption = modelOptions.find(option => (
+    option.provider === configuredProvider && option.model === configuredModel
+  ))
+  const effectiveModelOption = savedModelOption || configuredModelOption || modelOptions[0] || null
+  const effectiveModel = effectiveModelOption?.model || configuredModel
+  const effectiveProvider = effectiveModelOption?.provider || configuredProvider
+  const selectedModelKey = effectiveModelOption?.key || ''
   const capabilities = selectedModelCapabilities(modelPayload, effectiveProvider, effectiveModel)
+  const selectedModelPresentation = modelPresentation(effectiveModel, capabilities)
+  const compactSelectedModelLabel = compactModelLabel(selectedModelPresentation.label)
   const thinkingPreference = thinkingByProfile[currentName] !== false
   const effectiveThinking = thinkingPreference && capabilities.reasoning
   const effort = normalizeReasoningEffort(selectedEfforts[currentName] || 'medium')
+  const reasoningEffortLevel = REASONING_SLIDER_VALUES[reasoningEffortSliderPosition(effort)]
+  const reasoningEffortLabel = WORKLOAD_TIER_LABELS[reasoningEffortLevel]
   const fastPreference = fastByProfile[currentName] === true
   const effectiveFast = fastPreference && capabilities.fast
-  const selectedOptionValue = selectedOption?.key || '__profile_default__'
-  const modelControlsReady = supportsModelOverride && supportsModelCatalog && !modelsQuery.isPending && !modelsQuery.isError
+  const modelControlsReady = supportsModelCatalog && !modelsQuery.isPending && !modelsQuery.isError && modelOptions.length > 0
   const messages = histories[currentName] || []
   const draft = drafts[currentName] || ''
+  const attachments = attachmentsByProfile[currentName] || []
   const activeJob = activeJobs[currentName] || null
   const selectedActivityLabel = profileActivityLabel(activeJob)
   const activeJobIds = useMemo(
@@ -551,6 +1035,10 @@ function AgentDock() {
       storage.set('selected-profile', profiles[0].name)
     }
   }, [profiles.length, selected])
+
+  useEffect(() => {
+    setModelMenuPanel('advanced')
+  }, [currentName])
 
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' })
@@ -744,26 +1232,70 @@ function AgentDock() {
     haptic('tap')
   }
 
-  const selectModel = value => {
-    if (!currentName) return
-    const option = value === '__profile_default__' ? null : modelOptions.find(item => item.key === value)
-    if (value !== '__profile_default__' && !option) return
+  const selectModel = key => {
+    if (!currentName || activeJobsRef.current[currentName]) return
+    const option = modelOptions.find(candidate => candidate.key === key)
+    if (!option) return
     setSelectedModels(current => {
-      const next = { ...current }
-      if (option) next[currentName] = option.model
-      else delete next[currentName]
+      const next = { ...current, [currentName]: { provider: option.provider, model: option.model } }
       storage.set('selected-models', next)
       return next
     })
-    setSelectedProviders(current => {
-      const next = { ...current }
-      if (option) next[currentName] = option.provider
-      else delete next[currentName]
-      storage.set('selected-providers', next)
-      return next
-    })
-    setModelFilter('')
     haptic('tap')
+  }
+
+  const ingestImages = async (files, profile = currentName) => {
+    if (!profile || !files.length || activeJobsRef.current[profile]) return
+    const existing = attachmentsByProfile[profile] || []
+    const accepted = []
+    for (const file of files) {
+      const error = validateImageFileMetadata(file, existing.length + accepted.length)
+      if (error) {
+        host.notify({ kind: 'error', message: error })
+        continue
+      }
+      try {
+        accepted.push({
+          id: makeRequestId(),
+          name: String(file.name || 'image').slice(0, 180),
+          mime_type: String(file.type || '').toLowerCase(),
+          size: file.size,
+          data_url: await readImageAsDataUrl(file)
+        })
+      } catch (error) {
+        host.notify({ kind: 'error', message: error?.message || String(error) })
+      }
+    }
+    if (!accepted.length) return
+    setAttachmentsByProfile(current => ({
+      ...current,
+      [profile]: [...(current[profile] || []), ...accepted].slice(0, MAX_IMAGE_ATTACHMENTS)
+    }))
+  }
+
+  const selectImages = event => {
+    const files = Array.from(event.target.files || [])
+    event.target.value = ''
+    void ingestImages(files, currentName)
+  }
+
+  const pasteImages = event => {
+    const profile = currentName
+    if (!profile || activeJobsRef.current[profile] || !supportsImageUpload) return
+    const files = extractClipboardImageFiles(event.clipboardData)
+    if (!files.length) return
+
+    const existingCount = (attachmentsByProfile[profile] || []).length
+    if (shouldConsumeClipboardPaste(event.clipboardData, files, existingCount)) event.preventDefault()
+    void ingestImages(files, profile)
+  }
+
+  const removeImage = imageId => {
+    if (!currentName) return
+    setAttachmentsByProfile(current => ({
+      ...current,
+      [currentName]: (current[currentName] || []).filter(image => image.id !== imageId)
+    }))
   }
 
   const setThinking = checked => {
@@ -795,7 +1327,8 @@ function AgentDock() {
 
   const send = async () => {
     const message = draft.trim()
-    if (!message || !currentName || activeJob) return
+    const images = attachments
+    if ((!message && !images.length) || !currentName || activeJob) return
     const profile = currentName
     const requestId = makeRequestId()
     const sessionId = sessions[profile] || null
@@ -804,7 +1337,8 @@ function AgentDock() {
       id: `local:${requestId}`,
       role: 'user',
       profile,
-      text: message,
+      text: message || `Attached ${images.length} image${images.length === 1 ? '' : 's'} for analysis.`,
+      attachments: images.map(image => ({ name: image.name, mime_type: image.mime_type, size: image.size })),
       assignment,
       created_at: Date.now()
     }
@@ -818,6 +1352,7 @@ function AgentDock() {
     })) return
     append(profile, optimistic)
     setDraft(profile, '')
+    setAttachmentsByProfile(current => ({ ...current, [profile]: [] }))
     const body = buildJobPayload({
       profile,
       provider: modelControlsReady ? effectiveProvider : '',
@@ -826,6 +1361,7 @@ function AgentDock() {
       effort,
       fast: supportsFast && effectiveFast,
       message,
+      images,
       session_id: sessionId,
       request_id: requestId,
       assign_task: assignment,
@@ -902,6 +1438,7 @@ function AgentDock() {
   const clearConversation = () => {
     if (!currentName || activeJob) return
     persistHistory(currentName, [])
+    setAttachmentsByProfile(current => ({ ...current, [currentName]: [] }))
     setSessions(current => {
       const next = { ...current }
       delete next[currentName]
@@ -913,6 +1450,8 @@ function AgentDock() {
   const agentHeading = currentProfile
     ? `${profileDisplayLabel(currentProfile.name)}${effectiveModel ? ` · ${effectiveModel}` : ''}`
     : 'Choose an agent'
+  const normalizedDockMode = normalizeDockMode(mode)
+  const dockAction = dockModeAction(normalizedDockMode)
 
   return jsxs('section', {
     className: 'relative flex h-full min-h-0 flex-col overflow-hidden bg-(--ui-surface-background)',
@@ -941,6 +1480,18 @@ function AgentDock() {
                       : 'Direct specialist sessions · local profile routing'
                   })
                 ]
+              }),
+              jsx('button', {
+                'aria-label': `${dockAction} Agent Dock`,
+                className: 'shrink-0 rounded-md px-2 py-1 text-[0.62rem] font-medium text-(--ui-text-tertiary) hover:bg-(--ui-control-hover-background) hover:text-foreground',
+                'data-agent-dock-mode': normalizedDockMode,
+                onClick: () => {
+                  haptic('tap')
+                  onToggleMode?.()
+                },
+                title: `${dockAction} Agent Dock`,
+                type: 'button',
+                children: dockAction
               }),
               jsx('button', {
                 'aria-label': muted ? 'Enable achievement sound' : 'Mute achievement sound',
@@ -985,13 +1536,12 @@ function AgentDock() {
                                   children: jsxs('span', {
                                     className: 'flex min-w-0 flex-1 items-center gap-1.5',
                                     children: [
-                                      jsx('span', {
-                                        'aria-hidden': true,
-                                        className: cn(
-                                          'inline-block size-1.5 shrink-0 rounded-full',
-                                          activeJob ? 'animate-pulse bg-(--ui-accent)' : 'bg-(--ui-text-quaternary)'
-                                        )
-                                      }),
+                                      activeJob
+                                        ? jsx(RubikWorkingOrb, { label: `${profileDisplayLabel(currentName)} working` })
+                                        : jsx('span', {
+                                            'aria-hidden': true,
+                                            className: 'inline-block size-1.5 shrink-0 rounded-full bg-(--ui-text-quaternary)'
+                                          }),
                                       jsx(SelectValue, { placeholder: 'Choose agent' }),
                                       jsx('span', {
                                         className: cn(
@@ -1038,57 +1588,170 @@ function AgentDock() {
                             })
                           ]
                         }),
-                        jsxs('label', {
-                          className: 'min-w-0',
-                          children: [
-                            jsx('span', { className: 'mb-1 block text-[0.58rem] font-medium uppercase tracking-[0.1em] text-(--ui-text-quaternary)', children: 'Model' }),
-                            jsxs(Select, {
-                              disabled: !modelControlsReady,
-                              onValueChange: selectModel,
-                              value: selectedOptionValue,
-                              children: [
-                                jsx(SelectTrigger, {
-                                  'aria-label': 'Select model',
-                                  className: 'h-7 w-full min-w-0 text-[0.7rem]',
-                                  title: modelControlsReady ? 'Select any model configured for this agent' : 'Loading the native Hermes model catalog',
-                                  children: jsx(SelectValue, { placeholder: modelsQuery.isPending ? 'Loading models…' : 'Profile default' })
-                                }),
-                                jsxs(SelectContent, {
+                        jsx('div', {
+                          className: 'min-w-0 self-end',
+                          children: jsxs(DropdownMenu, {
+                            onOpenChange: open => {
+                              if (!open) setModelMenuPanel('advanced')
+                            },
+                            children: [
+                              jsx(DropdownMenuTrigger, {
+                                asChild: true,
+                                children: jsxs(Button, {
+                                  'aria-label': modelControlsReady
+                                    ? `${effectiveProvider} · ${selectedModelPresentation.label} · Workload tier: ${selectedModelPresentation.tierLabel} · Reasoning effort: ${reasoningEffortLabel}`
+                                    : 'Loading models available through the configured profile provider',
+                                  className: 'h-7 w-full min-w-0 justify-start gap-1.5 rounded-md border border-(--ui-stroke-secondary) bg-(--ui-control-hover-background) px-2 text-[0.68rem] font-normal text-(--ui-text-secondary)',
+                                  disabled: !modelControlsReady || Boolean(activeJob),
+                                  title: modelControlsReady
+                                    ? `${effectiveProvider} · ${selectedModelPresentation.label} · Workload tier: ${selectedModelPresentation.tierLabel} · Reasoning effort: ${reasoningEffortLabel}`
+                                    : 'Loading models available through the configured profile provider',
+                                  type: 'button',
+                                  variant: 'ghost',
                                   children: [
-                                    jsx(SelectItem, {
-                                      value: '__profile_default__',
-                                      children: `Profile default${currentProfile?.model ? ` · ${currentProfile.model}` : ''}`
-                                    }),
-                                    ...modelGroups.flatMap(group => [
-                                      jsx(SelectItem, {
-                                        className: 'pointer-events-none text-[0.58rem] font-semibold uppercase tracking-[0.1em] text-(--ui-text-quaternary)',
-                                        disabled: true,
-                                        value: `__provider__${group.provider}`,
-                                        children: group.providerName
-                                      }, `provider:${group.provider}`),
-                                      ...group.options.map(option =>
-                                        jsx(SelectItem, { value: option.key, children: option.model }, option.key)
-                                      )
-                                    ])
+                                    jsx(Codicon, { className: 'shrink-0 text-(--ui-text-secondary)', name: 'zap', size: '0.72rem' }),
+                                    jsx('span', { className: 'min-w-0 truncate', children: compactSelectedModelLabel }),
+                                    supportsReasoning && capabilities.reasoning
+                                      ? jsx('span', { className: 'ml-auto shrink-0 text-(--ui-text-tertiary)', children: reasoningEffortLabel })
+                                      : null,
+                                    jsx(Codicon, { className: 'shrink-0 text-(--ui-text-quaternary)', name: 'chevron-down', size: '0.72rem' })
                                   ]
                                 })
-                              ]
-                            })
-                          ]
+                              }),
+                              jsx(DropdownMenuContent, {
+                                align: 'end',
+                                className: 'w-64 p-1',
+                                sideOffset: 6,
+                                children: modelMenuPanel === 'advanced'
+                                  ? [
+                                      jsx('div', {
+                                        className: 'px-2 py-1 text-[0.62rem] font-medium text-(--ui-text-tertiary)',
+                                        children: 'Advanced'
+                                      }, 'advanced-label'),
+                                      jsxs(DropdownMenuItem, {
+                                        className: 'min-h-8',
+                                        onSelect: event => {
+                                          event.preventDefault()
+                                          setModelMenuPanel('model')
+                                        },
+                                        children: [
+                                          jsx('span', { children: 'Model' }),
+                                          jsx('span', { className: 'ml-auto min-w-0 truncate text-(--ui-text-tertiary)', children: compactSelectedModelLabel }),
+                                          jsx(Codicon, { name: 'chevron-right', size: '0.75rem' })
+                                        ]
+                                      }, 'advanced-model'),
+                                      jsxs(DropdownMenuItem, {
+                                        className: 'min-h-8',
+                                        disabled: !supportsReasoning || !capabilities.reasoning || !effectiveThinking,
+                                        onSelect: event => {
+                                          event.preventDefault()
+                                          setModelMenuPanel('effort')
+                                        },
+                                        children: [
+                                          jsx('span', { children: 'Effort' }),
+                                          jsx('span', {
+                                            className: 'ml-auto text-(--ui-text-tertiary)',
+                                            children: supportsReasoning && capabilities.reasoning && effectiveThinking ? reasoningEffortLabel : 'Unavailable'
+                                          }),
+                                          jsx(Codicon, { name: 'chevron-right', size: '0.75rem' })
+                                        ]
+                                      }, 'advanced-effort')
+                                    ]
+                                  : modelMenuPanel === 'model'
+                                    ? [
+                                        jsxs(DropdownMenuItem, {
+                                          className: 'min-h-8 font-medium',
+                                          onSelect: event => {
+                                            event.preventDefault()
+                                            setModelMenuPanel('advanced')
+                                          },
+                                          children: [
+                                            jsx(Codicon, { name: 'chevron-left', size: '0.75rem' }),
+                                            jsx('span', { children: 'Model' })
+                                          ]
+                                        }, 'model-back'),
+                                        jsx(DropdownMenuSeparator, { key: 'model-separator' }),
+                                        ...modelOptions.map(option => {
+                                          const presentation = modelPresentation(option.model, option)
+                                          return jsxs(DropdownMenuItem, {
+                                            className: 'min-h-8',
+                                            onSelect: () => selectModel(option.key),
+                                            textValue: `${presentation.label} ${presentation.tierLabel} workload`,
+                                            children: [
+                                              jsx('span', { className: 'min-w-0 truncate', children: compactModelLabel(presentation.label) }),
+                                              jsx(Badge, {
+                                                className: 'ml-auto shrink-0 px-1 text-[0.56rem]',
+                                                title: `Workload tier: ${presentation.tierLabel}`,
+                                                variant: 'outline',
+                                                children: presentation.tierLabel
+                                              }),
+                                              option.key === selectedModelKey
+                                                ? jsx(Codicon, { className: 'text-(--ui-accent)', name: 'check', size: '0.72rem' })
+                                                : null
+                                            ]
+                                          }, option.key)
+                                        })
+                                      ]
+                                    : [
+                                        jsxs(DropdownMenuItem, {
+                                          className: 'min-h-8 font-medium',
+                                          onSelect: event => {
+                                            event.preventDefault()
+                                            setModelMenuPanel('advanced')
+                                          },
+                                          children: [
+                                            jsx(Codicon, { name: 'chevron-left', size: '0.75rem' }),
+                                            jsx('span', { children: 'Effort' })
+                                          ]
+                                        }, 'effort-back'),
+                                        jsx(DropdownMenuSeparator, { key: 'effort-separator' }),
+                                        jsxs('div', {
+                                          className: 'space-y-1.5 px-2 py-2',
+                                          key: 'effort-slider',
+                                          children: [
+                                            jsxs('div', {
+                                              className: 'flex items-center justify-between gap-2 text-[0.62rem] text-(--ui-text-tertiary)',
+                                              children: [
+                                                jsx('span', { children: 'Reasoning effort' }),
+                                                jsx('span', { className: 'font-medium text-(--ui-text-secondary)', children: reasoningEffortLabel })
+                                              ]
+                                            }),
+                                            jsx('input', {
+                                              'aria-label': 'Reasoning effort',
+                                              'aria-valuetext': reasoningEffortLabel,
+                                              className: 'h-1 w-full appearance-none rounded-full bg-(--ui-stroke-tertiary)',
+                                              disabled: !supportsReasoning || !capabilities.reasoning || !effectiveThinking || Boolean(activeJob),
+                                              max: 2,
+                                              min: 0,
+                                              onChange: event => {
+                                                haptic('selection')
+                                                setEffort(reasoningEffortForSliderPosition(event.target.value))
+                                              },
+                                              onKeyDown: event => event.stopPropagation(),
+                                              step: 1,
+                                              style: { accentColor: 'var(--ui-accent)' },
+                                              type: 'range',
+                                              value: reasoningEffortSliderPosition(effort)
+                                            }),
+                                            jsxs('div', {
+                                              className: 'flex items-center justify-between text-[0.54rem] text-(--ui-text-quaternary)',
+                                              children: [
+                                                jsx('span', { children: 'Low' }),
+                                                jsx('span', { children: 'Medium' }),
+                                                jsx('span', { children: 'High' })
+                                              ]
+                                            })
+                                          ]
+                                        })
+                                      ]
+                              })
+                            ]
+                          })
                         })
                       ]
                     }),
-                    jsx('input', {
-                      'aria-label': 'Filter models',
-                      className: 'h-7 w-full rounded-md border border-(--ui-stroke-secondary) bg-(--ui-bg-secondary) px-2 text-[0.67rem] text-foreground outline-none placeholder:text-(--ui-text-quaternary) focus:border-(--ui-accent)',
-                      disabled: !modelControlsReady,
-                      onChange: event => setModelFilter(event.target.value),
-                      placeholder: modelOptions.length ? `Filter ${modelOptions.length} configured models…` : 'No configured models',
-                      type: 'search',
-                      value: modelFilter
-                    }),
                     modelsQuery.isError
-                      ? jsx('p', { className: 'text-[0.62rem] text-(--ui-danger)', children: 'The native model catalog could not be loaded for this agent.' })
+                      ? jsx('p', { className: 'text-[0.62rem] text-(--ui-danger)', children: 'The configured profile model could not be loaded.' })
                       : null
                   ]
                 })
@@ -1127,14 +1790,14 @@ function AgentDock() {
               }),
               activeJob
                 ? jsxs('div', {
-                    className: 'mx-3 mb-1.5 flex items-center gap-2 rounded-lg border border-(--ui-stroke-secondary) bg-(--ui-bg-secondary) px-2.5 py-1.5',
+                    'aria-label': `${profileDisplayLabel(activeJob.profile)} ${profileActivityLabel(activeJob).toLowerCase()}`,
+                    className: 'mx-3 mb-1.5 flex items-center gap-1.5',
+                    role: 'status',
                     children: [
-                      jsx(Codicon, { name: 'loading', className: 'animate-spin text-(--ui-accent)', size: '0.76rem' }),
                       jsx('span', {
-                        className: 'min-w-0 flex-1 truncate text-[0.68rem] text-(--ui-text-secondary)',
-                        children: activeJob.id
-                          ? `${profileDisplayLabel(activeJob.profile)} is working in a direct session…`
-                          : `${profileDisplayLabel(activeJob.profile)} is starting a direct session…`
+                        className: 'grid size-8 shrink-0 place-items-center rounded border border-(--ui-stroke-secondary) bg-(--ui-bg-secondary)',
+                        title: `${profileDisplayLabel(activeJob.profile)} · ${profileActivityLabel(activeJob)}`,
+                        children: jsx(RubikWorkingOrb, { label: `${currentProfile?.display_name || currentName} ${profileActivityLabel(activeJob)}` })
                       }),
                       activeJob.id
                         ? jsx('button', {
@@ -1150,6 +1813,35 @@ function AgentDock() {
               jsxs('div', {
                 className: 'shrink-0 border-t border-(--ui-stroke-secondary) p-2.5',
                 children: [
+                  jsx('input', {
+                    accept: 'image/png,image/jpeg,image/gif,image/webp,image/bmp',
+                    'aria-label': 'Choose images',
+                    className: 'hidden',
+                    disabled: !currentName || Boolean(activeJob) || !supportsImageUpload,
+                    multiple: true,
+                    onChange: event => void selectImages(event),
+                    ref: imageInputRef,
+                    type: 'file'
+                  }),
+                  attachments.length
+                    ? jsx('div', {
+                        className: 'mb-1.5 flex flex-wrap gap-1',
+                        children: attachments.map(image => jsxs('span', {
+                          className: 'inline-flex max-w-full items-center gap-1 rounded border border-(--ui-stroke-secondary) bg-(--ui-bg-secondary) px-1.5 py-0.5 text-[0.61rem] text-(--ui-text-secondary)',
+                          children: [
+                            jsx('img', { alt: '', className: 'size-4 rounded object-cover', src: image.data_url }),
+                            jsx('span', { className: 'max-w-28 truncate', children: image.name }),
+                            jsx('button', {
+                              'aria-label': `Remove ${image.name}`,
+                              className: 'text-(--ui-text-quaternary) hover:text-foreground',
+                              onClick: () => removeImage(image.id),
+                              type: 'button',
+                              children: '×'
+                            })
+                          ]
+                        }, image.id))
+                      })
+                    : null,
                   jsx(Textarea, {
                     'aria-label': `Message ${profileDisplayLabel(currentName) || 'selected agent'}`,
                     className: 'min-h-[3.25rem] max-h-32 resize-none text-xs',
@@ -1161,12 +1853,21 @@ function AgentDock() {
                         void send()
                       }
                     },
+                    onPaste: pasteImages,
                     placeholder: currentName ? `Message ${profileDisplayLabel(currentName)}…` : 'No profiles found',
                     value: draft
                   }),
                   jsxs('div', {
                     className: 'mt-1.5 flex items-center gap-2',
                     children: [
+                      jsx('button', {
+                        className: 'text-[0.62rem] text-(--ui-text-quaternary) hover:text-(--ui-text-secondary) disabled:opacity-40',
+                        disabled: Boolean(activeJob) || !currentName || !supportsImageUpload || attachments.length >= MAX_IMAGE_ATTACHMENTS,
+                        onClick: () => imageInputRef.current?.click(),
+                        title: supportsImageUpload ? `Attach up to ${MAX_IMAGE_ATTACHMENTS} local images` : 'Image upload is unavailable',
+                        type: 'button',
+                        children: attachments.length ? `Images ${attachments.length}/${MAX_IMAGE_ATTACHMENTS}` : 'Attach image'
+                      }),
                       jsx('button', {
                         className: 'text-[0.62rem] text-(--ui-text-quaternary) hover:text-(--ui-text-secondary) disabled:opacity-40',
                         disabled: Boolean(activeJob) || !messages.length,
@@ -1195,7 +1896,7 @@ function AgentDock() {
                         children: 'Enter send · Shift+Enter newline'
                       }),
                       jsx(Button, {
-                        disabled: !draft.trim() || !currentName || Boolean(activeJob),
+                        disabled: (!draft.trim() && !attachments.length) || !currentName || Boolean(activeJob),
                         onClick: send,
                         size: 'sm',
                         children: assignTask ? 'Assign' : 'Send'
@@ -1265,7 +1966,9 @@ function DockStatusButton({ onToggle }) {
     title: `${toggleLabel} · ${activityLabel}`,
     type: 'button',
     children: [
-      jsx(Codicon, { name: working ? 'loading' : 'hubot', className: working ? 'animate-spin' : undefined, size: '0.72rem' }),
+      working
+        ? jsx(RubikWorkingOrb, { label: `${activities.length} agent${activities.length === 1 ? '' : 's'} working` })
+        : jsx(Codicon, { name: 'hubot', size: '0.72rem' }),
       jsx('span', { children: 'Agent Dock' }),
       working && activities.length > 1
         ? jsx('span', { className: 'tabular-nums text-[0.6rem]', children: activities.length })
@@ -1277,31 +1980,27 @@ function DockStatusButton({ onToggle }) {
 export default {
   id: ID,
   name: 'Hermes Agent Dock',
-  description: 'A docked direct-chat pane for specialist Hermes profiles with native model controls.',
+  description: 'A floating direct-chat card for specialist Hermes profiles with native Dock/Undock mode.',
   defaultEnabled: true,
   register(ctx) {
     rest = ctx.rest
     storage = ctx.storage
     dockPaneDisposer = null
     $dockOpen.set(false)
+    const savedDockMode = normalizeDockMode(storage.get('dock-mode', DEFAULT_DOCK_MODE))
+    $dockMode.set(savedDockMode)
 
-    const openDock = () => {
+    const openDock = (mode = $dockMode.get()) => {
       if (dockPaneDisposer) return
+      const nextMode = normalizeDockMode(mode)
+      $dockMode.set(nextMode)
       dockPaneDisposer = ctx.register({
-        id: 'dock-v3',
+        id: nextMode === 'floating' ? 'dock-floating-v1' : 'dock-docked-v1',
         area: PANES_AREA,
         order: 80,
         title: 'Agent Dock',
-        data: {
-          placement: 'right',
-          dock: { pane: 'files', pos: 'top' },
-          height: '50%',
-          width: 'clamp(19rem, 24vw, 22rem)',
-          minWidth: '18rem',
-          maxWidth: '26rem',
-          uncloseable: true
-        },
-        render: () => jsx(AgentDock, {})
+        data: dockPaneData(nextMode),
+        render: () => jsx(AgentDock, { mode: nextMode, onToggleMode: toggleDockMode })
       })
       storage.set('dock-open', true)
       $dockOpen.set(true)
@@ -1315,9 +2014,31 @@ export default {
       $dockOpen.set(false)
     }
 
+    const setDockMode = mode => {
+      const nextMode = normalizeDockMode(mode)
+      $dockMode.set(nextMode)
+      storage.set('dock-mode', nextMode)
+      if (!dockPaneDisposer) return
+      closeDock()
+      openDock(nextMode)
+    }
+
+    const toggleDockMode = () => setDockMode(nextDockMode($dockMode.get()))
     const toggleDock = () => ($dockOpen.get() ? closeDock() : openDock())
 
     ctx.registerMany([
+      {
+        id: 'pet-toggle',
+        area: PET_ACTIONS_AREA,
+        order: 80,
+        data: {
+          label: 'Toggle Agent Dock',
+          run: () => {
+            haptic('tap')
+            toggleDock()
+          }
+        }
+      },
       {
         id: 'launcher',
         area: STATUSBAR_AREAS.right,
@@ -1336,10 +2057,12 @@ export default {
       }
     ])
 
-    if (storage.get('dock-open', false)) openDock()
+    storage.set('dock-mode', savedDockMode)
+    if (storage.get('dock-open', false)) openDock(savedDockMode)
     ctx.onDispose(() => {
       dockPaneDisposer = null
       $dockOpen.set(false)
+      $dockMode.set(savedDockMode)
     })
   }
 }

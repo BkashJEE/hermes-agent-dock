@@ -6,4 +6,5 @@ htmlcov/
 .DS_Store
 Thumbs.db
 *.log
+*.bak-*
 .venv/

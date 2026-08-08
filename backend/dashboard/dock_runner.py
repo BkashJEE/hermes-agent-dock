@@ -11,11 +11,15 @@ import argparse
 import contextlib
 import io
 import json
+import os
 import sys
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any
 
 MAX_TURNS = 120
+MAX_IMAGE_ATTACHMENTS = 4
+MAX_IMAGE_BYTES = 10 * 1024 * 1024
 VALID_REASONING_EFFORTS = (
     "none",
     "minimal",
@@ -41,12 +45,61 @@ def _diagnostic_tail(*streams: str, limit: int = 360) -> str:
 
 
 def _catalog() -> dict[str, Any]:
-    from hermes_cli.inventory import build_model_options_payload, load_picker_context
+    """Return the configured provider and its Hermes-available alternatives."""
+    from hermes_cli.inventory import build_models_payload, load_picker_context
 
-    payload = build_model_options_payload(load_picker_context(), explicit_only=True)
-    if not isinstance(payload, dict):
-        raise RuntimeError("Hermes model catalog returned an invalid payload")
-    return payload
+    context = load_picker_context()
+    provider = str(context.current_provider or "").strip()
+    model = str(context.current_model or "").strip()
+    payload = build_models_payload(
+        context,
+        explicit_only=True,
+        capabilities=True,
+        for_picker=True,
+        probe_custom_providers=False,
+        probe_current_custom_provider=True,
+    )
+    source_row = next(
+        (
+            row
+            for row in payload.get("providers", [])
+            if isinstance(row, dict) and str(row.get("slug") or "").strip() == provider
+        ),
+        None,
+    )
+
+    providers: list[dict[str, Any]] = []
+    if provider:
+        raw_models = source_row.get("models", []) if source_row else []
+        models = list(
+            dict.fromkeys(
+                str(entry).strip()
+                for entry in raw_models
+                if isinstance(entry, str) and str(entry).strip()
+            )
+        )
+        if model and model not in models:
+            models.insert(0, model)
+
+        raw_capabilities = source_row.get("capabilities", {}) if source_row else {}
+        capabilities: dict[str, dict[str, bool]] = {}
+        for model_id in models:
+            raw = raw_capabilities.get(model_id, {}) if isinstance(raw_capabilities, dict) else {}
+            capabilities[model_id] = {
+                "reasoning": bool(raw.get("reasoning")) if isinstance(raw, dict) else False,
+                "fast": bool(raw.get("fast")) if isinstance(raw, dict) else False,
+            }
+
+        providers.append(
+            {
+                "slug": provider,
+                "name": str(source_row.get("name") or provider) if source_row else provider,
+                "models": models,
+                "total_models": len(models),
+                "capabilities": capabilities,
+            }
+        )
+    return {"providers": providers, "model": model, "provider": provider}
 
 
 def _request_from_stdin() -> dict[str, Any]:
@@ -59,10 +112,42 @@ def _request_from_stdin() -> dict[str, Any]:
     return dict(raw)
 
 
+def _request_image_paths(request: Mapping[str, Any]) -> list[Path]:
+    raw_images = request.get("images") or []
+    if not isinstance(raw_images, list) or len(raw_images) > MAX_IMAGE_ATTACHMENTS:
+        raise ValueError("Invalid Agent Dock image list")
+    if not raw_images:
+        return []
+    configured_home = (os.environ.get("HERMES_HOME") or "").strip()
+    if not configured_home:
+        raise ValueError("Hermes profile home is unavailable for image attachments")
+    allowed_root = (Path(configured_home).resolve() / "images" / "agent-dock").resolve()
+    images: list[Path] = []
+    for raw_path in raw_images:
+        if not isinstance(raw_path, str) or not raw_path.strip():
+            raise ValueError("Invalid Agent Dock image path")
+        try:
+            path = Path(raw_path).resolve(strict=True)
+        except OSError as exc:
+            raise ValueError("Agent Dock image is unavailable") from exc
+        if allowed_root != path.parent and allowed_root not in path.parents:
+            raise ValueError("Agent Dock image escaped the profile image directory")
+        if not path.is_file() or path.stat().st_size > MAX_IMAGE_BYTES:
+            raise ValueError("Agent Dock image is unavailable or too large")
+        images.append(path)
+    return images
+
+
 def _quiet_chat(request: Mapping[str, Any]) -> tuple[str, str]:
+    images = _request_image_paths(request)
     message = request.get("message")
-    if not isinstance(message, str) or not message.strip():
+    if not isinstance(message, str):
+        raise ValueError("Agent Dock request message must be a string")
+    message = message.strip()
+    if not message and not images:
         raise ValueError("Agent Dock request message is empty")
+    if not message:
+        message = "Please analyze the attached image or images."
 
     model = request.get("model")
     if model is not None and not isinstance(model, str):
@@ -108,7 +193,7 @@ def _quiet_chat(request: Mapping[str, Any]) -> tuple[str, str]:
     captured_stderr = io.StringIO()
     try:
         with contextlib.redirect_stdout(captured_stdout), contextlib.redirect_stderr(captured_stderr):
-            response = cli.chat(message)
+            response = cli.chat(message, images=images or None)
         if response is None:
             detail = _diagnostic_tail(captured_stderr.getvalue(), captured_stdout.getvalue())
             raise RuntimeError(f"Hermes returned no response{f': {detail}' if detail else ''}")

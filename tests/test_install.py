@@ -24,6 +24,28 @@ uninstall_module = load("agent_dock_uninstall", "uninstall.py")
 
 
 class InstallLifecycleTests(unittest.TestCase):
+    def test_release_version_metadata_is_consistent(self):
+        version = install_module.VERSION
+        plugin_yaml_version = next(
+            line.split(":", 1)[1].strip()
+            for line in (ROOT / "backend" / "plugin.yaml").read_text(encoding="utf-8").splitlines()
+            if line.startswith("version:")
+        )
+        dashboard_manifest = json.loads(
+            (ROOT / "backend" / "dashboard" / "manifest.json").read_text(encoding="utf-8")
+        )
+        plugin_api_source = (ROOT / "backend" / "dashboard" / "plugin_api.py").read_text(
+            encoding="utf-8"
+        )
+        proof = json.loads((ROOT / "proof" / "live-verification.json").read_text(encoding="utf-8"))
+
+        self.assertRegex(version, r"^\d+\.\d+\.\d+$")
+        self.assertEqual(plugin_yaml_version, version)
+        self.assertEqual(dashboard_manifest["version"], version)
+        self.assertIn(f'PLUGIN_VERSION = "{version}"', plugin_api_source)
+        self.assertIn('"version": PLUGIN_VERSION', plugin_api_source)
+        self.assertEqual(proof["installation"]["plugin_version"], version)
+
     def test_copy_install_is_idempotent_and_uninstall_is_reversible(self):
         with tempfile.TemporaryDirectory() as directory:
             home = Path(directory) / "hermes"
@@ -117,6 +139,56 @@ class InstallLifecycleTests(unittest.TestCase):
             self.assertNotEqual(second["backup"], third["backup"])
             self.assertTrue(Path(second["backup"]).is_dir())
             self.assertTrue(Path(third["backup"]).is_dir())
+
+    def test_failed_backend_replacement_restores_previous_installation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory) / "hermes"
+            install_module.install(home, copy_only=True)
+            desktop = home / "desktop-plugins" / "hermes-agent-dock"
+            backend = home / "plugins" / "hermes-agent-dock"
+            (desktop / "previous.txt").write_text("desktop", encoding="utf-8")
+            (backend / "previous.txt").write_text("backend", encoding="utf-8")
+            real_copytree = install_module.shutil.copytree
+            failed = False
+
+            def fail_source_backend_once(source, destination, *args, **kwargs):
+                nonlocal failed
+                if Path(source) == install_module.ROOT / "backend" and not failed:
+                    failed = True
+                    raise OSError("simulated backend copy failure")
+                return real_copytree(source, destination, *args, **kwargs)
+
+            with patch.object(
+                install_module.shutil, "copytree", side_effect=fail_source_backend_once
+            ):
+                with self.assertRaisesRegex(RuntimeError, "previous files restored"):
+                    install_module.install(home, copy_only=True)
+            self.assertEqual((desktop / "previous.txt").read_text(encoding="utf-8"), "desktop")
+            self.assertEqual((backend / "previous.txt").read_text(encoding="utf-8"), "backend")
+
+    def test_failed_reversible_uninstall_restores_both_components(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory) / "hermes"
+            install_module.install(home, copy_only=True)
+            desktop = home / "desktop-plugins" / "hermes-agent-dock"
+            backend = home / "plugins" / "hermes-agent-dock"
+            (desktop / "previous.txt").write_text("desktop", encoding="utf-8")
+            (backend / "previous.txt").write_text("backend", encoding="utf-8")
+            real_rmtree = uninstall_module.shutil.rmtree
+            failed = False
+
+            def fail_backend_removal_once(path, *args, **kwargs):
+                nonlocal failed
+                if Path(path) == backend and not failed:
+                    failed = True
+                    raise OSError("simulated backend removal failure")
+                return real_rmtree(path, *args, **kwargs)
+
+            with patch.object(uninstall_module.shutil, "rmtree", side_effect=fail_backend_removal_once):
+                with self.assertRaisesRegex(RuntimeError, "installed files restored"):
+                    uninstall_module.uninstall(home, copy_only=True, purge=False)
+            self.assertEqual((desktop / "previous.txt").read_text(encoding="utf-8"), "desktop")
+            self.assertEqual((backend / "previous.txt").read_text(encoding="utf-8"), "backend")
 
     def test_uninstall_leaves_code_when_disable_is_not_confirmed(self):
         with tempfile.TemporaryDirectory() as directory:

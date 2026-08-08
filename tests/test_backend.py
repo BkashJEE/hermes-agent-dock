@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import importlib.util
 import inspect
 import json
@@ -49,17 +50,9 @@ CATALOG = {
             "name": "OpenAI Codex",
             "models": ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"],
             "capabilities": {
-                "gpt-5.6-sol": {"reasoning": True, "fast": False},
+                "gpt-5.6-sol": {"reasoning": True, "fast": True},
                 "gpt-5.6-terra": {"reasoning": True, "fast": True},
-                "gpt-5.6-luna": {"reasoning": False, "fast": False},
-            },
-        },
-        {
-            "slug": "nous",
-            "name": "Nous Portal",
-            "models": ["anthropic/claude-opus-5"],
-            "capabilities": {
-                "anthropic/claude-opus-5": {"reasoning": True, "fast": False}
+                "gpt-5.6-luna": {"reasoning": True, "fast": True},
             },
         },
     ],
@@ -83,6 +76,7 @@ class BackendSecurityTests(unittest.TestCase):
             "reasoning_effort": "none",
             "fast": False,
             "assign_task": False,
+            "images": [],
         }
         values.update(overrides)
         return api.SendRequest(**values)
@@ -118,6 +112,8 @@ class BackendSecurityTests(unittest.TestCase):
                 api._build_command(self.request(message="x" * (api.MAX_MESSAGE_CHARS + 1)))
             with self.assertRaisesRegex(ValueError, "Invalid request ID"):
                 api._build_command(self.request(request_id="short"))
+            with self.assertRaisesRegex(ValueError, "Message is empty"):
+                api._build_command(self.request(message="   "))
         normalized = self.request(message="  hello  ")
         self.assertEqual(normalized.message, "hello")
         self.assertEqual(json.loads(api._runner_payload(normalized))["message"], "hello")
@@ -135,14 +131,15 @@ class BackendSecurityTests(unittest.TestCase):
         self.assertIn("request_id is required", raised.exception.detail)
         self.assertEqual(api._JOBS, {})
 
-    def test_provider_and_model_are_catalog_scoped(self):
+    def test_provider_and_model_are_profile_scoped(self):
         with self.validation():
-            api._build_command(self.request(model="gpt-5.6-luna"))
-            api._build_command(
-                self.request(provider="nous", model="anthropic/claude-opus-5")
-            )
+            api._build_command(self.request())
+            api._build_command(self.request(model="gpt-5.6-sol"))
+            payload = json.loads(api._runner_payload(self.request(model="gpt-5.6-luna")))
+            self.assertEqual(payload["provider"], "openai-codex")
+            self.assertEqual(payload["model"], "gpt-5.6-luna")
             with self.assertRaisesRegex(ValueError, "Provider is not present"):
-                api._build_command(self.request(provider="unknown"))
+                api._build_command(self.request(provider="nous", model="anthropic/claude-opus-5"))
             with self.assertRaisesRegex(ValueError, "Model is not configured"):
                 api._build_command(self.request(model="unknown/model"))
 
@@ -152,10 +149,78 @@ class BackendSecurityTests(unittest.TestCase):
             api._build_command(self.request(fast=True))
             with self.assertRaisesRegex(ValueError, "Invalid reasoning effort"):
                 api._build_command(self.request(reasoning_effort="extreme"))
+        unsupported = {
+            **CATALOG,
+            "providers": [{**CATALOG["providers"][0], "capabilities": {"gpt-5.6-terra": {}}}],
+        }
+        with patch.multiple(
+            api,
+            _profile_rows=Mock(return_value=PROFILE_ROWS),
+            _load_model_catalog=Mock(return_value=unsupported),
+        ):
             with self.assertRaisesRegex(ValueError, "does not support reasoning"):
-                api._build_command(self.request(model="gpt-5.6-luna", reasoning_effort="high"))
+                api._build_command(self.request(reasoning_effort="high"))
             with self.assertRaisesRegex(ValueError, "does not support fast"):
-                api._build_command(self.request(model="gpt-5.6-sol", fast=True))
+                api._build_command(self.request(fast=True))
+
+    def test_image_payload_is_signature_checked_bounded_and_can_be_image_only(self):
+        png = b"\x89PNG\r\n\x1a\ncontent"
+        attachment = {
+            "name": "diagram.png",
+            "mime_type": "image/png",
+            "data_url": "data:image/png;base64," + base64.b64encode(png).decode("ascii"),
+        }
+        request = self.request(message="", images=[attachment])
+        with self.validation():
+            api._build_command(request)
+        decoded, extension = api._decode_image_attachment(request.images[0])
+        self.assertEqual(decoded, png)
+        self.assertEqual(extension, ".png")
+        with self.assertRaisesRegex(ValueError, "Unsupported"):
+            api._decode_image_attachment(
+                api.ImageAttachment(
+                    name="fake.png",
+                    mime_type="image/png",
+                    data_url="data:image/png;base64," + base64.b64encode(b"not-an-image").decode("ascii"),
+                )
+            )
+        with self.assertRaises(ValidationError):
+            self.request(images=[attachment] * (api.MAX_IMAGE_ATTACHMENTS + 1))
+
+    def test_runner_payload_contains_paths_not_image_bytes_and_temp_files_are_removed(self):
+        png = b"\x89PNG\r\n\x1a\ncontent"
+        request = self.request(
+            images=[
+                {
+                    "name": "diagram.png",
+                    "mime_type": "image/png",
+                    "data_url": "data:image/png;base64," + base64.b64encode(png).decode("ascii"),
+                }
+            ]
+        )
+
+        class FakeProcess:
+            returncode = 0
+
+            def communicate(self, input=None, timeout=None):
+                self.received = input
+                return "image reply", "session_id: 20260805_010203_image\n"
+
+        process = FakeProcess()
+        api._JOBS["job-image"] = {"id": "job-image", "status": "starting", "kanban_task_id": None}
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            with patch.object(api, "_build_command", return_value=[sys.executable, "runner", "--chat"]), patch.object(
+                api, "_profile_home", return_value=home
+            ), patch.object(api, "_catalog_environment", return_value={"HERMES_HOME": str(home)}), patch.object(
+                api.subprocess, "Popen", return_value=process
+            ):
+                api._run_job("job-image", request)
+            payload = json.loads(process.received)
+            self.assertEqual(len(payload["images"]), 1)
+            self.assertNotIn(request.images[0].data_url, process.received)
+            self.assertFalse((home / "images" / "agent-dock" / "job-image").exists())
+        self.assertEqual(api._JOBS["job-image"]["status"], "done")
 
     def test_profile_home_and_environment_preserve_raw_profile_identity(self):
         root = Path("C:/HermesHome")
@@ -392,6 +457,8 @@ class BackendSecurityTests(unittest.TestCase):
     def test_profiles_advertises_native_controls(self, _rows):
         result = asyncio.run(api.profiles())
         self.assertTrue(result["capabilities"]["model_catalog"])
+        self.assertTrue(result["capabilities"]["image_upload"])
+        self.assertEqual(result["capabilities"]["max_images"], api.MAX_IMAGE_ATTACHMENTS)
         self.assertTrue(result["capabilities"]["reasoning"])
         self.assertTrue(result["capabilities"]["fast"])
         self.assertTrue(result["capabilities"]["idempotent_submit"])
