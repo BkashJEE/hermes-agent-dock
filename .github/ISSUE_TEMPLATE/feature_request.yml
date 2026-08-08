@@ -1,0 +1,64 @@
+name: Feature suggestion
+description: Suggest a focused improvement or new capability
+title: "[Suggestion]: "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for suggesting an improvement. Describe the user outcome first, then the smallest behavior that would achieve it.
+  - type: checkboxes
+    id: preflight
+    attributes:
+      label: Preflight
+      options:
+        - label: I searched existing issues and the roadmap for similar ideas.
+          required: true
+        - label: This suggestion does not require exposing private conversations, credentials, or cross-user data.
+          required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or unmet need
+      description: What is difficult today, and who experiences it?
+    validations:
+      required: true
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Desired outcome
+      description: Describe the result rather than prescribing a large implementation.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Suggested approach
+      description: Optional. Include a bounded workflow or interface proposal.
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence or examples
+      description: Link public references or add privacy-safe screenshots and examples.
+  - type: dropdown
+    id: area
+    attributes:
+      label: Product area
+      options:
+        - Onboarding and installation
+        - Floating or docked UI
+        - Profiles, models, or sessions
+        - Images and composer
+        - Assignment and Kanban
+        - Accessibility or performance
+        - Security or privacy
+        - Documentation
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: boundaries
+    attributes:
+      label: Risks or boundaries
+      description: Note privacy, compatibility, cost, or approval considerations.

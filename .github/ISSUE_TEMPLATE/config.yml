@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/BkashJEE/hermes-agent-dock/security/policy
+    about: Report security issues privately according to SECURITY.md instead of opening a public issue.
+  - name: Usage and troubleshooting guide
+    url: https://github.com/BkashJEE/hermes-agent-dock#troubleshooting
+    about: Check installation, usage, and troubleshooting guidance before opening an issue.

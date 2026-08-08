@@ -245,9 +245,20 @@ python -m py_compile backend/dashboard/plugin_api.py backend/dashboard/dock_runn
 - `install.py` / `uninstall.py` — reversible, stdlib-only lifecycle.
 - `PRODUCT_SPEC.md` — acceptance contract and explicit non-goals.
 - `SECURITY.md` — trust boundaries and reporting guidance.
+- `CONTRIBUTING.md` — bug reports, feature suggestions, pull-request workflow, verification, and privacy requirements.
 - `docs/assets/` — privacy-sanitized real product views and the clearly labeled onboarding illustration.
 - `LICENSE` — Agent Dock's MIT license grant.
 - `THIRD_PARTY_NOTICES.md` — attribution and license text for the adapted Thinking Orbs painter.
+
+## Contributing and suggestions
+
+Contributions are welcome. You can:
+
+- [Report a bug](https://github.com/BkashJEE/hermes-agent-dock/issues/new?template=bug_report.yml) with reproducible, privacy-safe evidence.
+- [Suggest a feature](https://github.com/BkashJEE/hermes-agent-dock/issues/new?template=feature_request.yml) by describing the unmet need and desired outcome.
+- Fork the repository and open a pull request using the built-in PR template.
+
+Read [CONTRIBUTING.md](CONTRIBUTING.md) before submitting. It defines the focused-change workflow, required verification, compatibility expectations, and strict privacy/security boundaries. Report vulnerabilities privately through [SECURITY.md](SECURITY.md), not a public issue.
 
 ## Roadmap
 
