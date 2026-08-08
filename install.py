@@ -15,7 +15,7 @@ import uuid
 from pathlib import Path
 
 PLUGIN_ID = "hermes-agent-dock"
-VERSION = "0.2.0"
+VERSION = "0.2.1"
 ROOT = Path(__file__).resolve().parent
 ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 PLAIN_ROW_RE = re.compile(r"^(not enabled|enabled|disabled)\s+\S+\s+\S+\s+(\S+)\s*$", re.IGNORECASE)
@@ -48,7 +48,7 @@ def backup_existing(home: Path, destinations: list[Path]) -> Path | None:
     backup = home / "backups" / PLUGIN_ID / stamp
     backup.mkdir(parents=True, exist_ok=False)
     for path in existing:
-        label = "desktop" if "desktop-plugins" in path.parts else "backend"
+        label = "desktop" if path == home / "desktop-plugins" / PLUGIN_ID else "backend"
         shutil.copytree(path, backup / label)
     return backup
 

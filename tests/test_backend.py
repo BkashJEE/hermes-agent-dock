@@ -453,6 +453,40 @@ class BackendSecurityTests(unittest.TestCase):
         kanban.complete_task.assert_not_called()
         connection.close.assert_called_once()
 
+    def test_kanban_settlement_error_never_exposes_private_path(self):
+        api._JOBS["job-private-path"] = {
+            "id": "job-private-path",
+            "kanban_task_id": "t_agentdock",
+        }
+        private_path = r"C:\Users\Alice\private\board.sqlite"
+        with patch.object(
+            api,
+            "_settle_kanban_task",
+            side_effect=PermissionError(f"{private_path}: permission denied"),
+        ):
+            api._settle_job_kanban("job-private-path", "done", "response")
+        stored = api._JOBS["job-private-path"]["kanban_error"]
+        self.assertEqual(stored, "Kanban update failed; inspect local Hermes logs")
+        self.assertNotIn(private_path, stored)
+
+    @patch.object(api.threading, "Thread")
+    def test_kanban_assignment_error_never_exposes_private_path(self, _thread_cls):
+        request = self.request(request_id="req-private-path", assign_task=True)
+        private_path = r"C:\Users\Alice\private\board.sqlite"
+        with self.validation(), patch.object(
+            api,
+            "_create_kanban_task",
+            side_effect=PermissionError(f"{private_path}: permission denied"),
+        ):
+            with self.assertRaises(api.HTTPException) as raised:
+                api.create_job(request)
+        self.assertEqual(raised.exception.status_code, 503)
+        self.assertEqual(
+            raised.exception.detail,
+            "Kanban assignment failed; inspect local Hermes logs",
+        )
+        self.assertNotIn(private_path, raised.exception.detail)
+
     @patch.object(api, "_profile_rows", return_value=[])
     def test_profiles_advertises_native_controls(self, _rows):
         result = asyncio.run(api.profiles())

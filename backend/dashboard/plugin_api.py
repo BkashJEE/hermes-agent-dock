@@ -38,7 +38,7 @@ except ImportError:  # pragma: no cover - only for source-tree linting
 
 router = APIRouter()
 
-PLUGIN_VERSION = "0.2.0"
+PLUGIN_VERSION = "0.2.1"
 MAX_MESSAGE_CHARS = 12_000
 MAX_RESPONSE_CHARS = 120_000
 MAX_IMAGE_ATTACHMENTS = 4
@@ -383,7 +383,7 @@ def _settle_job_kanban(job_id: str, status: str, detail: str) -> None:
         with _JOBS_LOCK:
             job = _JOBS.get(job_id)
             if job:
-                job["kanban_error"] = f"Kanban update failed: {exc}"[:500]
+                job["kanban_error"] = "Kanban update failed; inspect local Hermes logs"
 
 
 def _catalog_command() -> list[str]:
@@ -792,7 +792,10 @@ def create_job(request: SendRequest) -> dict[str, Any]:
         try:
             kanban_task_id = _create_kanban_task(request, job_id)
         except (PermissionError, RuntimeError, ValueError, OSError) as exc:
-            raise HTTPException(status_code=503, detail=f"Kanban assignment failed: {exc}") from exc
+            raise HTTPException(
+                status_code=503,
+                detail="Kanban assignment failed; inspect local Hermes logs",
+            ) from exc
         _JOBS[job_id] = {
             "id": job_id,
             "profile": request.profile.strip().lower(),

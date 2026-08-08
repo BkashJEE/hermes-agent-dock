@@ -140,6 +140,15 @@ class InstallLifecycleTests(unittest.TestCase):
             self.assertTrue(Path(second["backup"]).is_dir())
             self.assertTrue(Path(third["backup"]).is_dir())
 
+    def test_custom_home_nested_under_desktop_plugins_keeps_backup_labels_distinct(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory) / "desktop-plugins" / "hermes"
+            install_module.install(home, copy_only=True)
+            second = install_module.install(home, copy_only=True)
+            backup = Path(second["backup"])
+            self.assertTrue((backup / "desktop" / "plugin.js").is_file())
+            self.assertTrue((backup / "backend" / "plugin.yaml").is_file())
+
     def test_failed_backend_replacement_restores_previous_installation(self):
         with tempfile.TemporaryDirectory() as directory:
             home = Path(directory) / "hermes"

@@ -25,6 +25,7 @@ Give a Hermes Desktop user a fast, direct route to any configured specialist pro
 17. A user can attach up to four signature-validated PNG/JPEG/GIF/WebP/BMP images (10 MB each, 25 MB total). Bytes remain ephemeral, runner paths stay under the selected profile's `images/agent-dock` directory, and cleanup runs after success, error, timeout, or cancellation.
 18. The selected agent row and collapsed launcher render the compact 20 px **Working** orb only while one or more real jobs are active. Terminal/idle states remove it; reduced-motion users receive a static frame; hidden/offscreen instances stop animating.
 19. On a host exposing the public `pet.actions` contribution area, a plain primary click on the in-window pet invokes the same idempotent Dock toggle as the native launchers. Pet drag and Shift-click pop-out remain host-owned, and older hosts ignore the optional pet contribution while preserving status-bar and command-palette access.
+20. Cross-channel live conversation continuity is not part of v0.2.1. Telegram and Agent Dock retain channel-scoped transcripts; a future release may share authorized profile context and task state while preserving explicit user, chat, thread, and source boundaries.
 
 ## Supported specialist routing
 
@@ -41,7 +42,7 @@ Give a Hermes Desktop user a fast, direct route to any configured specialist pro
 - Floating mode (default): when Agent Dock is opened, the card appears at the host-supported top-right anchor without changing workspace geometry. Its header exposes **Dock**; in docked mode the same control reads **Undock** and the bottom tile reflows Browser and the main workspace while Files remains independent.
 - Mode persistence: `dock-mode` is stored through the plugin's namespaced `ctx.storage`; a close/reopen keeps the user's floating or docked choice.
 - Open header: Agent Dock, selected profile, busy/ready state, mode control, and mute.
-- Working indicator: one compact, theme-aware six-color 20 px Rubik/solving canvas tied to actual active-job state; idle dots stay unchanged and the status launcher retains the concurrent-agent count.
+- Working indicator: one compact 20 px solving canvas in a single cyan hue, with contrast-adjusted dark/light variants, tied to actual active-job state; idle dots stay unchanged and the status launcher retains the concurrent-agent count.
 - Agent picker: compact dropdown containing every discovered profile.
 - Model selector: compact per-profile control that starts on the saved model, offers only alternatives from that profile's configured/authenticated Hermes provider, persists the Dock choice per profile, and shows a deterministic **Workload tier** for each model. Unknown provider models remain selectable by their authoritative Hermes IDs and capability metadata.
 - Conversation: compact user/assistant bubbles with persistent local date/time metadata; final responses only in v0.2.
@@ -67,9 +68,10 @@ All surfaces use Hermes theme variables; tier colors are created with `color-mix
 - Explicitly assigned messages also create a linked local Hermes Kanban card on `executive-organization`.
 - No telemetry, analytics, or independent external service is added by the plugin itself; selected profiles retain their configured model-provider behavior and costs.
 
-## Non-goals for v0.2
+## Non-goals for v0.2.1
 
 - OS-level always-on-top window or private DOM overlay/interception.
 - Streaming partial tokens.
 - Non-image files, voice input, public posting, payments, or automatic approvals.
 - Automatic task inference from ordinary conversation or automatic completion without Dad/CEO verification.
+- Blind merging of Telegram, Agent Dock, group, DM, or thread transcripts based only on a matching profile display name.

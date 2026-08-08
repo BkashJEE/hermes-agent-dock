@@ -1,13 +1,31 @@
 {
-  "verified_at": "2026-08-08T05:50:04Z",
-  "status": "release_candidate_verified_manual_audit_approved_for_release",
-  "ship_status": "ship_with_independent_review_unavailable",
-  "publication_status": "publication_authorized_independent_review_waived",
+  "verified_at": "2026-08-08T08:21:21Z",
+  "status": "v0.2.1_release_candidate_verified",
+  "ship_status": "ship_with_independent_terminal_verdict_unavailable",
+  "publication_status": "v0.2.1_publication_authorized_not_yet_published",
   "independent_closeout": {
-    "delegation_id": "deleg_3924d579",
-    "reviewed_scope_sha256": "561b7b55391e56b90bf114804f552328d672f2e2df01a1a3dd67fb2da3a1ee75",
-    "findings": [],
-    "verdict": "ship"
+    "v0_2_0_prior_review": {
+      "delegation_id": "deleg_3924d579",
+      "reviewed_scope_sha256": "561b7b55391e56b90bf114804f552328d672f2e2df01a1a3dd67fb2da3a1ee75",
+      "findings": [],
+      "verdict": "ship"
+    },
+    "v0_2_1_primary_review": {
+      "delegation_id": "deleg_63f9454c",
+      "status": "timed_out_after_substantive_review",
+      "accepted_findings": [
+        "A custom Hermes home nested under an ancestor named desktop-plugins could collide the desktop and backend backup labels.",
+        "Raw Kanban assignment and settlement exceptions could expose private local paths through public diagnostics."
+      ],
+      "accepted_findings_fixed": true
+    },
+    "v0_2_1_followup_review": {
+      "delegation_id": "deleg_587709dd",
+      "status": "substantive_checks_completed_terminal_verdict_not_retained",
+      "final_staged_diff_and_images_reviewed": true,
+      "python_tests_independently_passed": 51,
+      "terminal_ship_verdict_available": false
+    }
   },
   "presentation": {
     "default_mode": "floating",
@@ -40,26 +58,26 @@
     "native_move_collapse_position_persistence_supported": true
   },
   "tests": {
-    "python": {"passed": 48, "failed": 0},
+    "python": {"passed": 51, "failed": 0},
     "node": {"passed": 26, "failed": 0},
     "javascript_syntax": "passed",
     "python_compile": "passed",
     "diff_check": "passed",
-    "total": {"passed": 74, "failed": 0}
+    "total": {"passed": 77, "failed": 0}
   },
   "installation": {
     "plugin_inventory_name": "hermes-agent-dock",
     "plugin_inventory_status": "enabled",
-    "plugin_version": "0.2.0",
-    "source_sha256": "c10ef36cd8529d397c43773ab68fad0169ccffa858b2d3ced295b9d04b47fa6a",
-    "installed_sha256": "c10ef36cd8529d397c43773ab68fad0169ccffa858b2d3ced295b9d04b47fa6a",
+    "plugin_version": "0.2.1",
+    "source_sha256": "20984d12670deb792dd0f4d25389c11451b5202242f79c092f738e85e0110b24",
+    "installed_sha256": "20984d12670deb792dd0f4d25389c11451b5202242f79c092f738e85e0110b24",
     "source_installed_parity": true
   },
-  "rubik_orb_followup": {
-    "status": "implemented_installed_live_render_verified_ship_approved",
-    "component": "RubikWorkingOrb",
+  "working_orb_followup": {
+    "status": "single_cyan_implemented_installed_focused_tests_and_controlled_render_verified",
+    "component": "SolvingWorkingOrb",
     "upstream_source": "thinking-orbs 0.2.0 solving/rubik 20px preset",
-    "local_adaptation": "stable six-color signed-axis palette with dark-surface and light-surface variants",
+    "local_adaptation": "one cyan hue with brighter dark-surface and deeper light-surface contrast variants",
     "working_locations": 3,
     "idle_indicator_unchanged": true,
     "canvas_css_px": {"width": 20, "height": 20},
@@ -76,15 +94,28 @@
       "model_tokens_consumed": false,
       "floating_pane_px": {"width": 380, "height": 540},
       "orb_fit_unclipped": true,
-      "light_surface_palette_pixels_observed": true,
-      "dark_surface_palette_pixels_observed_with_temporary_theme_variables": true,
+      "prior_multicolor_light_surface_pixels_observed": true,
+      "prior_multicolor_dark_surface_pixels_observed_with_temporary_theme_variables": true,
+      "single_cyan_pixels_observed_in_prior_live_run": false,
       "direct_frame_difference_proof": false,
       "direct_frame_difference_note": "Optional two-frame hash probe was blocked because the disposable renderer exited before attachment; animation remains source- and test-verified through requestAnimationFrame lifecycle assertions."
     },
-    "independent_review": {
+    "prior_multicolor_independent_review": {
       "delegation_id": "deleg_35e939da",
       "findings": [],
       "verdict": "ship"
+    },
+    "single_cyan_controlled_render_qa": {
+      "source": "current solving geometry and constants rendered without model or API calls",
+      "artifact": "untracked temporary QA PNG",
+      "artifact_sha256": "3d10277baeb61a2ba1e12df8456e692ffa09464611c12eecb7291db3a62e51e5",
+      "dark_surface_color": "#38bdf8",
+      "light_surface_color": "#0369a1",
+      "single_hue_only": true,
+      "depth_alpha_preserved": true,
+      "unclipped": true,
+      "live_desktop_active_job_exercised": false,
+      "live_desktop_note": "Installed source parity is verified. A real active-job visual was not invoked because background text delivery was blocked and foreground focus was not separately approved."
     }
   },
   "isolated_live_qa": {
@@ -122,6 +153,26 @@
       "privacy_audit": "passed"
     }
   ],
+  "release_media": [
+    {
+      "path": "docs/assets/agent-dock-dark-cover.png",
+      "sha256": "2fcfa3bca04edc565a093e43b7266ca7ab27c2d822eb0d308a348066133f52e4",
+      "role": "conceptual_illustration",
+      "privacy_audit": "passed"
+    },
+    {
+      "path": "docs/assets/agent-dock-floating-clean.png",
+      "sha256": "998856a5fdcb1939d0113472e2e67b23110e5f7bb7f8ea43e2b0dc228643d925",
+      "role": "sanitized_real_floating_screenshot",
+      "privacy_audit": "passed"
+    },
+    {
+      "path": "docs/assets/agent-dock-docked-clean.png",
+      "sha256": "3f6eea4a63d4955dda0a106a0d4ccd09752fc0f3d514d73042118cb22c7877b7",
+      "role": "sanitized_real_docked_screenshot",
+      "privacy_audit": "passed"
+    }
+  ],
   "proof_media_audit": {
     "sidebar_session_titles_excluded": true,
     "private_prompts_excluded": true,
@@ -130,21 +181,23 @@
     "personal_paths_excluded": true
   },
   "final_release_audit": {
-    "status": "manual_audit_passed_independent_review_timed_out",
-    "release_version": "0.2.0",
-    "baseline_commit": "88c42fb3f547f092e06811a2c385c575eeda8e8d",
+    "status": "v0.2.1_audit_complete",
+    "release_version": "0.2.1",
+    "baseline_commit": "c1324166e603de248864ab7e480ace615bf1b8b7",
     "origin_main_matched_baseline_before_release": true,
     "accepted_findings_fixed": [
       "Version metadata was aligned across installer, backend manifest, dashboard manifest, health API, and proof ledger.",
       "A timestamped local plugin backup was preserved outside the repository and *.bak-* was added to .gitignore.",
-      "The product specification's stale monochrome-orbit description was corrected to the shipped six-color Rubik/solving indicator.",
+      "The working indicator contract was aligned to one cyan solving-orb hue with contrast-only light/dark variants; the former six-color signed-axis adaptation was removed.",
       "The explicit Pydantic StrictBool annotation for assign_task was restored, its importlib model-rebuild namespace was updated, and string/integer coercion remains rejection-tested.",
       "Install replacement and default reversible uninstall now restore both desktop and backend components after injected partial failures.",
-      "The README now provides a bounded Hermes-agent install-and-verify prompt and documents that profile discovery uses only the official metadata inventory rather than conversations, memories, credentials, or arbitrary files."
+      "The README now provides a bounded Hermes-agent install-and-verify prompt and documents that profile discovery uses only the official metadata inventory rather than conversations, memories, credentials, or arbitrary files.",
+      "Backup labels now use exact destinations, so custom Hermes homes nested under a desktop-plugins ancestor cannot collide desktop and backend backups.",
+      "Kanban assignment and settlement failures now return generic local-log guidance instead of raw exception text that could expose private paths."
     ],
     "security": {
       "github_mcp_secret_scan": "unavailable_local_fallback_used",
-      "changed_text_files_scanned": 17,
+      "changed_text_files_scanned": 12,
       "changed_text_secret_pattern_findings": 0,
       "git_history_blobs_scanned": 19,
       "git_history_secret_pattern_findings": 0,
@@ -164,8 +217,9 @@
       "reversible_uninstall": "passed",
       "failed_install_rollback_injection": "passed",
       "failed_reversible_uninstall_rollback_injection": "passed",
+      "custom_home_backup_label_collision_probe": "passed",
       "normal_install_inventory_status": "enabled",
-      "normal_install_manifest_version": "0.2.0"
+      "normal_install_manifest_version": "0.2.1"
     },
     "qa_cleanup": {
       "isolated_renderer_pid_23688_active": false,
@@ -174,14 +228,15 @@
     },
     "proof_media_privacy_review": "passed",
     "combined_independent_review": {
-      "status": "timed_out_without_verdict",
+      "status": "findings_fixed_followup_substantive_review_completed_without_retained_terminal_verdict",
       "completed_ship_verdict": false,
-      "release_decision": "Dad authorized immediate publication after the verified manual audit."
+      "release_decision": "Dad explicitly authorized immediate publication after the final 77-test gate, installed parity verification, fixed independent findings, and documented reviewer-verdict limitation."
     }
   },
   "limitations": [
     "Normal packaged Hermes was not replaced with the separate PET_ACTIONS_AREA core change; normal-app floating mode is available through status-bar and command-palette fallbacks, while pet-toggle activation still requires that core update.",
     "Hermes native floating panes currently provide move, collapse, viewport clamping, and position persistence, but not freeform resize.",
-    "Repeated post-fix independent review runs timed out without a verdict; Dad explicitly authorized immediate publication after the verified manual audit."
+    "Telegram and Agent Dock retain separate live session transcripts in v0.2.1; matching profile names share profile configuration and durable memory but do not prove automatic cross-channel conversation resumption.",
+    "Independent review found two defects that were fixed and regression-tested; the follow-up reviewer re-read the final diff and independently passed 51 Python tests, but its terminal ship verdict was not retained. Dad explicitly authorized immediate publication with this limitation documented."
   ]
 }

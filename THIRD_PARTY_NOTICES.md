@@ -2,9 +2,9 @@
 
 ## thinking-orbs 0.2.0
 
-Hermes Agent Dock includes an adapted copy of the 20 px `solving` Rubik canvas painter from [thinking-orbs](https://github.com/JakubAntalik/thinking-orbs).
+Hermes Agent Dock includes an adapted copy of the 20 px `solving` canvas painter from [thinking-orbs](https://github.com/JakubAntalik/thinking-orbs).
 
-The upstream painter is monochrome. Agent Dock locally adapts the exact compact solving geometry with a stable six-color, theme-aware palette: light text on a dark surface uses restrained electric lime, sky blue, amber, coral, violet, and aqua tones; dark text on a light surface uses darker corresponding tones.
+Agent Dock preserves the upstream monochrome direction with one cyan hue. A brighter cyan is used on dark surfaces and a deeper cyan on light surfaces for contrast; one frame never contains multiple working-orb colors.
 
 MIT License
 

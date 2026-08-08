@@ -601,7 +601,7 @@ function AchievementCard({ item, compact = false }) {
 }
 
 /*
- * Rubik working orb adapted from the 20 px `solving` painter in
+ * Solving working orb adapted from the 20 px `solving` painter in
  * thinking-orbs 0.2.0 by Jakub Antalik.
  * Source: https://github.com/JakubAntalik/thinking-orbs
  * Copyright (c) 2026 Jakub Antalik
@@ -617,8 +617,8 @@ function AchievementCard({ item, compact = false }) {
  * PARTICULAR PURPOSE. See THIRD_PARTY_NOTICES.md for the complete MIT license.
  *
  * The 20 px solving preset is intentionally tuned, not scaled down from 64 px.
- * thinking-orbs paints this geometry monochrome; the six-color palette below is
- * a local Agent Dock adaptation, with one stable color per signed dominant axis.
+ * Agent Dock preserves the upstream monochrome direction with one cyan hue.
+ * The dark/light variants change contrast only; they never create multicolor faces.
  */
 const RUBIK_SOLVING_20_PRESET = Object.freeze({
   latRings: 4,
@@ -632,22 +632,8 @@ const RUBIK_SOLVING_20_PRESET = Object.freeze({
   rMin: 0.3,
   radius: 0.82
 })
-const RUBIK_DARK_PALETTE = Object.freeze([
-  '#b8f25a',
-  '#62c7f5',
-  '#f4c15d',
-  '#f28b82',
-  '#b7a0f5',
-  '#5bd6c5'
-])
-const RUBIK_LIGHT_PALETTE = Object.freeze([
-  '#4f7417',
-  '#1f6f9f',
-  '#975c00',
-  '#a33e3e',
-  '#6546a2',
-  '#147568'
-])
+const SOLVING_DARK_COLOR = '#38bdf8'
+const SOLVING_LIGHT_COLOR = '#0369a1'
 
 function rubikHash(a, b) {
   const value = Math.sin(a * 12.9898 + b * 78.233) * 43758.5453
@@ -733,14 +719,6 @@ function rubikApplyMoves(point, moves, state) {
   return [x, y, z, active]
 }
 
-function rubikOriginalAxisIndex(x, y, z) {
-  const absX = Math.abs(x)
-  const absY = Math.abs(y)
-  const absZ = Math.abs(z)
-  if (absX >= absY && absX >= absZ) return x >= 0 ? 0 : 1
-  if (absY >= absZ) return y >= 0 ? 2 : 3
-  return z >= 0 ? 4 : 5
-}
 
 function rubikCssChannel(value) {
   const text = String(value ?? '').trim()
@@ -771,12 +749,12 @@ function rubikTextColorIsLight(color) {
   return (0.2126 * channels[0] + 0.7152 * channels[1] + 0.0722 * channels[2]) / 255 >= 0.58
 }
 
-function rubikPaletteForCanvas(canvas) {
+function solvingColorForCanvas(canvas) {
   const textColor = getComputedStyle(canvas).color
-  return rubikTextColorIsLight(textColor) ? RUBIK_DARK_PALETTE : RUBIK_LIGHT_PALETTE
+  return rubikTextColorIsLight(textColor) ? SOLVING_DARK_COLOR : SOLVING_LIGHT_COLOR
 }
 
-function drawRubikWorkingOrb(ctx, size, time) {
+function drawSolvingWorkingOrb(ctx, size, time) {
   const preset = RUBIK_SOLVING_20_PRESET
   const radius = (size / 2) * preset.radius
   const tilt = 0.35 + 0.1 * Math.sin(time * 0.9)
@@ -784,7 +762,7 @@ function drawRubikWorkingOrb(ctx, size, time) {
   const radiusScale = (size / 300) ** preset.rsPow
   const moves = rubikMoveSchedule(preset.moveCount)
   const moveState = rubikMoveAmounts(time, preset.moveCount)
-  const palette = rubikPaletteForCanvas(ctx.canvas)
+  const color = solvingColorForCanvas(ctx.canvas)
   const dots = []
 
   for (let ring = 0; ring <= preset.latRings; ring += 1) {
@@ -810,7 +788,7 @@ function drawRubikWorkingOrb(ctx, size, time) {
         z,
         radius: (preset.rBase + preset.rDepth * depth + (active ? preset.rActive : 0)) * radiusScale,
         alpha: Math.min(1, 0.28 + 0.72 * depth + (active ? 0.08 : 0)),
-        color: palette[rubikOriginalAxisIndex(originalX, originalY, originalZ)]
+        color
       })
     }
   }
@@ -826,7 +804,7 @@ function drawRubikWorkingOrb(ctx, size, time) {
   ctx.globalAlpha = 1
 }
 
-function RubikWorkingOrb({ label = 'Agent working' }) {
+function SolvingWorkingOrb({ label = 'Agent working' }) {
   const canvasRef = useRef(null)
   useEffect(() => {
     const canvas = canvasRef.current
@@ -841,7 +819,7 @@ function RubikWorkingOrb({ label = 'Agent working' }) {
     const paintFrame = seconds => {
       context.setTransform(dpr, 0, 0, dpr, 0, 0)
       context.clearRect(0, 0, size, size)
-      drawRubikWorkingOrb(context, size, seconds * RUBIK_SOLVING_20_PRESET.speed)
+      drawSolvingWorkingOrb(context, size, seconds * RUBIK_SOLVING_20_PRESET.speed)
     }
     if (window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) {
       paintFrame(0.6)
@@ -890,7 +868,7 @@ function RubikWorkingOrb({ label = 'Agent working' }) {
   return jsx('canvas', {
     'aria-label': label,
     className: 'block size-5 shrink-0 text-(--ui-text-secondary)',
-    'data-agent-dock-rubik-orb': 'true',
+    'data-agent-dock-working-orb': 'true',
     ref: canvasRef,
     role: 'img',
     style: { height: 20, width: 20 }
@@ -1537,7 +1515,7 @@ function AgentDock({ mode = DEFAULT_DOCK_MODE, onToggleMode }) {
                                     className: 'flex min-w-0 flex-1 items-center gap-1.5',
                                     children: [
                                       activeJob
-                                        ? jsx(RubikWorkingOrb, { label: `${profileDisplayLabel(currentName)} working` })
+                                        ? jsx(SolvingWorkingOrb, { label: `${profileDisplayLabel(currentName)} working` })
                                         : jsx('span', {
                                             'aria-hidden': true,
                                             className: 'inline-block size-1.5 shrink-0 rounded-full bg-(--ui-text-quaternary)'
@@ -1797,7 +1775,7 @@ function AgentDock({ mode = DEFAULT_DOCK_MODE, onToggleMode }) {
                       jsx('span', {
                         className: 'grid size-8 shrink-0 place-items-center rounded border border-(--ui-stroke-secondary) bg-(--ui-bg-secondary)',
                         title: `${profileDisplayLabel(activeJob.profile)} · ${profileActivityLabel(activeJob)}`,
-                        children: jsx(RubikWorkingOrb, { label: `${currentProfile?.display_name || currentName} ${profileActivityLabel(activeJob)}` })
+                        children: jsx(SolvingWorkingOrb, { label: `${currentProfile?.display_name || currentName} ${profileActivityLabel(activeJob)}` })
                       }),
                       activeJob.id
                         ? jsx('button', {
@@ -1967,7 +1945,7 @@ function DockStatusButton({ onToggle }) {
     type: 'button',
     children: [
       working
-        ? jsx(RubikWorkingOrb, { label: `${activities.length} agent${activities.length === 1 ? '' : 's'} working` })
+        ? jsx(SolvingWorkingOrb, { label: `${activities.length} agent${activities.length === 1 ? '' : 's'} working` })
         : jsx(Codicon, { name: 'hubot', size: '0.72rem' }),
       jsx('span', { children: 'Agent Dock' }),
       working && activities.length > 1
