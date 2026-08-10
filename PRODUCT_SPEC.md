@@ -2,7 +2,7 @@
 
 ## Main goal
 
-Give a Hermes Desktop user a fast, direct route to any configured specialist profile without waiting for the active orchestrator. The Dock is an on-demand floating card by default, with a visible **Dock**/**Undock** control that switches between two supported public `PANES_AREA` contributions. The selected mode persists in plugin-scoped storage; only the docked mode occupies workspace height and participates in native workspace reflow.
+Give a Hermes Desktop user a fast, direct route to any configured specialist profile and a safe way to communicate with an already-running Hermes session without restarting, replacing, or duplicating it. The Dock is an on-demand floating card by default, with a visible **Dock**/**Undock** control that switches between two supported public `PANES_AREA` contributions. The selected mode persists in plugin-scoped storage; only the docked mode occupies workspace height and participates in native workspace reflow.
 
 ## Acceptance evidence
 
@@ -25,7 +25,13 @@ Give a Hermes Desktop user a fast, direct route to any configured specialist pro
 17. A user can attach up to four signature-validated PNG/JPEG/GIF/WebP/BMP images (10 MB each, 25 MB total). Bytes remain ephemeral, runner paths stay under the selected profile's `images/agent-dock` directory, and cleanup runs after success, error, timeout, or cancellation.
 18. The selected agent row and collapsed launcher render the compact 20 px **Working** orb only while one or more real jobs are active. Terminal/idle states remove it; reduced-motion users receive a static frame; hidden/offscreen instances stop animating.
 19. On a host exposing the public `pet.actions` contribution area, a plain primary click on the in-window pet invokes the same idempotent Dock toggle as the native launchers. Pet drag and Shift-click pop-out remain host-owned, and older hosts ignore the optional pet contribution while preserving status-bar and command-palette access.
-20. Cross-channel live conversation continuity is not part of v0.2.1. Telegram and Agent Dock retain channel-scoped transcripts; a future release may share authorized profile context and task state while preserving explicit user, chat, thread, and source boundaries.
+20. Blind cross-channel transcript merging is not part of v0.3.0. Telegram and Agent Dock retain channel-scoped transcripts; live attachment uses explicit profile/session/run identity rather than a matching display name.
+21. Live attachment requires an exact `(runtime profile, stable session ID, runtime session ID, Dock run ID)` binding obtained from `session.active_list`; private session previews are not copied into Dock state.
+22. The profile-local SQLite ledger runs in WAL mode with foreign keys, bounded busy timeout, additive schema versioning, stable message IDs, one-winner dispatch leases, restart recovery, and immutable terminal receipt states.
+23. ASK dispatches only to an idle live session through `prompt.submit`; NUDGE uses `session.steer`; confirmed REDIRECT uses `session.redirect`; confirmed Stop uses `session.interrupt`. The UI never claims per-run Pause/Resume because Hermes has no verified contract for it.
+24. REDIRECT and Stop require explicit confirmation. Every control request uses `inherit-only` authority and cannot expand tools, credentials, filesystem scope, approvals, or provider access.
+25. `queued`, `dispatching`, `accepted`, `delivered`, and `applied` are distinct. The Dock does not label a gateway-accepted request as applied without an explicit consumer-originated receipt.
+26. Attached history, privacy-reduced events, status observations, verification evidence, and optional Kanban synchronization are run-scoped and survive a Desktop backend restart.
 
 ## Supported specialist routing
 
@@ -45,7 +51,7 @@ Give a Hermes Desktop user a fast, direct route to any configured specialist pro
 - Working indicator: one compact 20 px solving canvas in a single cyan hue, with contrast-adjusted dark/light variants, tied to actual active-job state; idle dots stay unchanged and the status launcher retains the concurrent-agent count.
 - Agent picker: compact dropdown containing every discovered profile.
 - Model selector: compact per-profile control that starts on the saved model, offers only alternatives from that profile's configured/authenticated Hermes provider, persists the Dock choice per profile, and shows a deterministic **Workload tier** for each model. Unknown provider models remain selectable by their authoritative Hermes IDs and capability metadata.
-- Conversation: compact user/assistant bubbles with persistent local date/time metadata; final responses only in v0.2.
+- Conversation: compact user/assistant bubbles with persistent local date/time metadata; launcher mode displays final responses only.
 - Composer: multiline input, compact **Attach image** text control and previews, Enter sends, Shift+Enter inserts a newline, explicit **Assign task** opt-in, and cancel while running.
 - Parallel work: each profile owns its draft and active job; switching profiles never cancels or blocks another profile, and host notifications announce completion or failure.
 - Achievement notification: a newly unlocked achievement appears as a temporary tier-aware flashcard; historical achievement browsing stays in the standalone Achievements page.
@@ -67,8 +73,9 @@ All surfaces use Hermes theme variables; tier colors are created with `color-mix
 - Achievement integration reads only the local `hermes-achievements/scan_snapshot.json` if present.
 - Explicitly assigned messages also create a linked local Hermes Kanban card on `executive-organization`.
 - No telemetry, analytics, or independent external service is added by the plugin itself; selected profiles retain their configured model-provider behavior and costs.
+- The control ledger stores exact operator intervention bodies because they are required for durable delivery, but event and receipt projections omit message bodies and redact secrets and private paths. The database is profile-local and never merges identities by display name.
 
-## Non-goals for v0.2.1
+## Non-goals for v0.3.0
 
 - OS-level always-on-top window or private DOM overlay/interception.
 - Streaming partial tokens.

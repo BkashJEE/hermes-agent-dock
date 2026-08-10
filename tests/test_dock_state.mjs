@@ -17,15 +17,20 @@ const exported = [
   'flattenModelOptions',
   'formatMessageTimestamp',
   'groupModelOptions',
+  'interventionMethod',
+  'interventionNeedsConfirmation',
+  'liveSessionsForProfile',
   'migrateSavedModelSelections',
   'modelOptionKey',
   'modelPresentation',
   'nextDockMode',
   'normalizeDockMode',
+  'normalizeInterventionKind',
   'reasoningEffortForSliderPosition',
   'reasoningEffortSliderPosition',
   'profileActivityLabel',
   'profileDisplayLabel',
+  'receiptLabel',
   'reconcileIdempotentSubmission',
   'pruneExpiredStartingJobs',
   'removeProfileJob',
@@ -63,6 +68,54 @@ const catalog = {
     }
   ]
 }
+
+test('live attachment requires exact runtime-profile identity and excludes private previews', () => {
+  const rows = [{
+    id: 'runtime-1',
+    session_key: '20260809_010203_live',
+    title: 'Current build',
+    status: 'working',
+    preview: 'PRIVATE CHAT CONTENT',
+    started_at: 10,
+    last_active: 20
+  }]
+  assert.deepEqual(state.liveSessionsForProfile(rows, 'jarvis', 'default'), [])
+  const projected = state.liveSessionsForProfile(rows, 'default', 'default')
+  assert.equal(projected.length, 1)
+  assert.equal(projected[0].id, 'runtime-1')
+  assert.equal(projected[0].session_key, '20260809_010203_live')
+  assert.equal('preview' in projected[0], false)
+})
+
+test('ASK, NUDGE, and REDIRECT map to distinct native methods and truthful receipts', () => {
+  assert.equal(state.normalizeInterventionKind('unknown'), 'ask')
+  assert.equal(state.interventionMethod('ask'), 'prompt.submit')
+  assert.equal(state.interventionMethod('nudge'), 'session.steer')
+  assert.equal(state.interventionMethod('redirect'), 'session.redirect')
+  assert.equal(state.interventionNeedsConfirmation('ask'), false)
+  assert.equal(state.interventionNeedsConfirmation('nudge'), false)
+  assert.equal(state.interventionNeedsConfirmation('redirect'), true)
+  assert.equal(state.receiptLabel('accepted'), 'Accepted by Hermes')
+  assert.equal(state.receiptLabel('applied'), 'Applied')
+  assert.equal(state.receiptLabel('unknown'), 'Unverified')
+  assert.notEqual(state.receiptLabel('accepted'), state.receiptLabel('applied'))
+})
+
+test('live control UI uses canonical gateway methods, durable routes, and truthful unavailable states', () => {
+  assert.match(pluginSource, /host\.request\('session\.active_list'/)
+  assert.match(pluginSource, /host\.request\('verification\.status'/)
+  assert.match(pluginSource, /host\.request\('session\.interrupt'/)
+  assert.match(pluginSource, /rest\('\/control\/runs'/)
+  assert.match(pluginSource, /\/control\/messages\/\$\{encodeURIComponent\(messageId\)\}\/claim/)
+  assert.match(pluginSource, /lease_seconds: 300/)
+  assert.match(pluginSource, /receipt_id: `\$\{messageId\}:\$\{state\}:hermes-gateway`/)
+  assert.match(pluginSource, /state === 'unknown' \? 'unverified' : 'observed'/)
+  assert.match(pluginSource, /gatewayStatus === 'rejected' \? 'rejected' : 'accepted'/)
+  assert.match(pluginSource, /Explicit confirmation required|confirmation required/i)
+  assert.match(pluginSource, /Pause unavailable/)
+  assert.match(pluginSource, /no verified per-run pause\/resume contract/)
+  assert.doesNotMatch(pluginSource, /receipt_state:\s*'applied'/)
+})
 
 test('floating mode is the explicit default and Dock/Undock mode changes are normalized', () => {
   assert.equal(state.normalizeDockMode(undefined), 'floating')

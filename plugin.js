@@ -459,6 +459,52 @@ async function reconcileIdempotentSubmission(submit, options) {
     return null
   }
 }
+
+const INTERVENTION_KINDS = Object.freeze(['ask', 'nudge', 'redirect'])
+
+function normalizeInterventionKind(value) {
+  return INTERVENTION_KINDS.includes(value) ? value : 'ask'
+}
+
+function interventionMethod(kind) {
+  const normalized = normalizeInterventionKind(kind)
+  if (normalized === 'nudge') return 'session.steer'
+  if (normalized === 'redirect') return 'session.redirect'
+  return 'prompt.submit'
+}
+
+function interventionNeedsConfirmation(kind) {
+  return normalizeInterventionKind(kind) === 'redirect'
+}
+
+function liveSessionsForProfile(rows, selectedProfile, runtimeProfile) {
+  if (!selectedProfile || selectedProfile !== runtimeProfile || !Array.isArray(rows)) return []
+  return rows
+    .filter(row => row && typeof row.id === 'string' && typeof row.session_key === 'string')
+    .map(row => ({
+      id: row.id,
+      session_key: row.session_key,
+      title: String(row.title || 'Untitled live session').slice(0, 120),
+      status: String(row.status || 'unavailable'),
+      started_at: Number(row.started_at) || null,
+      last_active: Number(row.last_active) || null,
+      subagent_id: typeof row.subagent_id === 'string' ? row.subagent_id : null,
+      kanban_task_id: typeof row.kanban_task_id === 'string' ? row.kanban_task_id : null
+    }))
+}
+
+function receiptLabel(state) {
+  return ({
+    queued: 'Queued',
+    dispatching: 'Dispatching',
+    accepted: 'Accepted by Hermes',
+    delivered: 'Delivered',
+    applied: 'Applied',
+    rejected: 'Rejected',
+    failed: 'Failed',
+    superseded: 'Superseded'
+  })[state] || 'Unverified'
+}
 // STATE_HELPERS_END
 
 function makeRequestId() {
@@ -897,6 +943,12 @@ function MessageBubble({ message }) {
               children: `Images · ${message.attachments.map(item => item.name).join(', ')}`
             })
           : null,
+        message.receipt_state
+          ? jsx('p', {
+              className: 'mt-1 text-[0.6rem] font-medium uppercase tracking-[0.08em] text-(--ui-accent)',
+              children: `${message.intervention ? message.intervention.toUpperCase() : 'CONTROL'} · ${receiptLabel(message.receipt_state)}`
+            })
+          : null,
         jsx('p', {
           className: 'mt-1 text-[0.56rem] tabular-nums tracking-[0.04em] text-(--ui-text-quaternary)',
           children: `${user
@@ -909,6 +961,8 @@ function MessageBubble({ message }) {
 }
 
 function AgentDock({ mode = DEFAULT_DOCK_MODE, onToggleMode }) {
+  const runtimeProfile = useValue(host.state.profile) || 'default'
+  const foregroundRuntimeSessionId = useValue(host.state.activeSessionId) || ''
   const profilesQuery = useQuery({ queryKey: [ID, 'profiles'], queryFn: () => rest('/profiles'), refetchInterval: 20_000 })
   const achievementsQuery = useQuery({
     queryKey: [ID, 'achievements'],
@@ -930,6 +984,10 @@ function AgentDock({ mode = DEFAULT_DOCK_MODE, onToggleMode }) {
   const [thinkingByProfile, setThinkingByProfile] = useState(() => storage.get('thinking', {}))
   const [fastByProfile, setFastByProfile] = useState(() => storage.get('fast', {}))
   const [assignTask, setAssignTask] = useState(false)
+  const [interventionKind, setInterventionKind] = useState('ask')
+  const [attachedRunIds, setAttachedRunIds] = useState(() => storage.get('attached-control-runs', {}))
+  const [candidateSessionIds, setCandidateSessionIds] = useState({})
+  const [pendingConfirmedAction, setPendingConfirmedAction] = useState(null)
   const [drafts, setDrafts] = useState(() => storage.get('drafts', {}))
   const [attachmentsByProfile, setAttachmentsByProfile] = useState({})
   const [activeJobs, setActiveJobs] = useState(() => {
@@ -955,6 +1013,40 @@ function AgentDock({ mode = DEFAULT_DOCK_MODE, onToggleMode }) {
   const supportsKanbanAssignment = profilesQuery.data?.capabilities?.kanban_assignment === true
   const currentProfile = profiles.find(profile => profile.name === selected) || profiles[0] || null
   const currentName = currentProfile?.name || selected
+  const activeSessionsQuery = useQuery({
+    queryKey: [ID, 'active-sessions', runtimeProfile, foregroundRuntimeSessionId],
+    queryFn: () => host.request('session.active_list', { current_session_id: foregroundRuntimeSessionId || undefined }),
+    refetchInterval: 2_500
+  })
+  const liveSessions = useMemo(
+    () => liveSessionsForProfile(activeSessionsQuery.data?.sessions, currentName, runtimeProfile),
+    [activeSessionsQuery.data, currentName, runtimeProfile]
+  )
+  const controlRunsQuery = useQuery({
+    queryKey: [ID, 'control-runs', currentName],
+    queryFn: () => rest(`/control/runs?profile=${encodeURIComponent(currentName)}`),
+    enabled: Boolean(currentName),
+    refetchInterval: 2_500
+  })
+  const attachedRunId = attachedRunIds[currentName] || ''
+  const attachedRun = (controlRunsQuery.data?.runs || []).find(run => run.run_id === attachedRunId) || null
+  const attachedLiveSession = liveSessions.find(session => session.id === attachedRun?.runtime_session_id) || null
+  const candidateSessionId = candidateSessionIds[currentName] || liveSessions[0]?.id || ''
+  const candidateLiveSession = liveSessions.find(session => session.id === candidateSessionId) || liveSessions[0] || null
+  const controlHistoryQuery = useQuery({
+    queryKey: [ID, 'control-history', attachedRunId, currentName, attachedRun?.session_id],
+    queryFn: () => rest(
+      `/control/runs/${encodeURIComponent(attachedRunId)}?profile=${encodeURIComponent(currentName)}&session_id=${encodeURIComponent(attachedRun.session_id)}`
+    ),
+    enabled: Boolean(attachedRunId && currentName && attachedRun?.session_id),
+    refetchInterval: 2_500
+  })
+  const verificationQuery = useQuery({
+    queryKey: [ID, 'verification', attachedRun?.session_id],
+    queryFn: () => host.request('verification.status', { session_id: attachedRun.session_id }),
+    enabled: Boolean(attachedRun?.session_id),
+    refetchInterval: 5_000
+  })
   const modelsQuery = useQuery({
     queryKey: [ID, 'models', currentName],
     queryFn: () => rest(`/models/${currentName}`),
@@ -989,7 +1081,17 @@ function AgentDock({ mode = DEFAULT_DOCK_MODE, onToggleMode }) {
   const fastPreference = fastByProfile[currentName] === true
   const effectiveFast = fastPreference && capabilities.fast
   const modelControlsReady = supportsModelCatalog && !modelsQuery.isPending && !modelsQuery.isError && modelOptions.length > 0
-  const messages = histories[currentName] || []
+  const localMessages = histories[currentName] || []
+  const durableControlMessages = (controlHistoryQuery.data?.messages || []).map(message => ({
+    id: `durable:${message.message_id}`,
+    role: 'user',
+    profile: currentName,
+    text: message.body,
+    intervention: message.kind,
+    receipt_state: message.state,
+    created_at: message.created_at
+  }))
+  const messages = attachedRun ? durableControlMessages : localMessages
   const draft = drafts[currentName] || ''
   const attachments = attachmentsByProfile[currentName] || []
   const activeJob = activeJobs[currentName] || null
@@ -1017,6 +1119,20 @@ function AgentDock({ mode = DEFAULT_DOCK_MODE, onToggleMode }) {
   useEffect(() => {
     setModelMenuPanel('advanced')
   }, [currentName])
+
+  useEffect(() => {
+    if (!attachedRun || !attachedLiveSession) return
+    void rest(`/control/runs/${encodeURIComponent(attachedRun.run_id)}/observations`, {
+      method: 'POST',
+      body: {
+        profile: currentName,
+        session_id: attachedRun.session_id,
+        status: attachedLiveSession.status,
+        heartbeat_at: attachedLiveSession.last_active,
+        detail: { source: 'session.active_list' }
+      }
+    }).catch(() => undefined)
+  }, [attachedRun?.run_id, attachedLiveSession?.status, attachedLiveSession?.last_active, currentName])
 
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' })
@@ -1210,6 +1326,189 @@ function AgentDock({ mode = DEFAULT_DOCK_MODE, onToggleMode }) {
     haptic('tap')
   }
 
+  const rememberAttachedRun = (profile, runId) => {
+    setAttachedRunIds(current => {
+      const next = { ...current }
+      if (runId) next[profile] = runId
+      else delete next[profile]
+      storage.set('attached-control-runs', next)
+      return next
+    })
+  }
+
+  const attachLiveSession = async session => {
+    const requestId = makeRequestId()
+    const run = await rest('/control/runs', {
+      method: 'POST',
+      body: {
+        request_id: requestId,
+        profile: currentName,
+        runtime_profile: runtimeProfile,
+        runtime_session_id: session.id,
+        session_id: session.session_key,
+        subagent_id: session.subagent_id,
+        kanban_task_id: session.kanban_task_id,
+        title: session.title,
+        status: session.status,
+        objective: 'Continue the existing Hermes run without changing its authority.',
+        permission_scope: 'inherit-only'
+      }
+    })
+    rememberAttachedRun(currentName, run.run_id)
+    await controlRunsQuery.refetch?.()
+    haptic('success')
+    host.notify({ kind: 'success', message: `Attached to ${session.title || 'live Hermes run'}` })
+  }
+
+  const claimControlMessage = messageId => rest(`/control/messages/${encodeURIComponent(messageId)}/claim`, {
+    method: 'POST',
+    body: {
+      dispatcher_id: `desktop:${runtimeProfile}`,
+      profile: currentName,
+      session_id: attachedRun.session_id,
+      lease_seconds: 300
+    }
+  })
+
+  const recordControlReceipt = async (messageId, state, detail = {}, dispatchToken = null) => {
+    const submit = token => rest(`/control/messages/${encodeURIComponent(messageId)}/receipts`, {
+      method: 'POST',
+      body: {
+        receipt_id: `${messageId}:${state}:hermes-gateway`,
+        state,
+        source: 'hermes-gateway',
+        verification: state === 'unknown' ? 'unverified' : 'observed',
+        profile: currentName,
+        session_id: attachedRun.session_id,
+        dispatch_token: token,
+        detail
+      }
+    })
+    try {
+      return await submit(dispatchToken)
+    } catch {
+      // The stable receipt ID makes this safe when the first response was lost.
+      try {
+        return await submit(dispatchToken)
+      } catch {
+        const renewed = await claimControlMessage(messageId)
+        return submit(renewed.dispatch_token)
+      }
+    }
+  }
+
+  const dispatchControlMessage = async (kind, text, confirmed = false) => {
+    if (!attachedRun || !attachedLiveSession) throw new Error('The attached Hermes run is no longer live.')
+    const normalizedKind = normalizeInterventionKind(kind)
+    if (interventionNeedsConfirmation(normalizedKind) && !confirmed) {
+      setPendingConfirmedAction({ kind: normalizedKind, text, type: 'redirect' })
+      return false
+    }
+    if (normalizedKind === 'ask' && attachedLiveSession.status !== 'idle') {
+      throw new Error('ASK waits for an idle run. Use NUDGE to deliver guidance at the next safe tool-result boundary.')
+    }
+
+    const messageId = makeRequestId()
+    await rest('/control/messages', {
+      method: 'POST',
+      body: {
+        message_id: messageId,
+        run_id: attachedRun.run_id,
+        profile: currentName,
+        session_id: attachedRun.session_id,
+        kind: normalizedKind,
+        body: text,
+        confirmed,
+        permission_scope: 'inherit-only'
+      }
+    })
+    const claim = await claimControlMessage(messageId)
+    if (claim.state !== 'dispatching') return false
+
+    let terminalReceiptRecorded = false
+    try {
+      const result = await host.request(interventionMethod(normalizedKind), {
+        session_id: attachedRun.runtime_session_id,
+        text
+      })
+      const gatewayStatus = String(result?.status || 'accepted')
+      if (gatewayStatus === 'rejected') {
+        await recordControlReceipt(messageId, 'rejected', {
+          method: interventionMethod(normalizedKind),
+          gateway_status: gatewayStatus
+        }, claim.dispatch_token)
+        terminalReceiptRecorded = true
+        throw new Error('Hermes rejected this intervention')
+      }
+      await recordControlReceipt(messageId, 'accepted', {
+        method: interventionMethod(normalizedKind),
+        gateway_status: gatewayStatus
+      }, claim.dispatch_token)
+      await controlHistoryQuery.refetch?.()
+      append(currentName, {
+        id: `control:${messageId}`,
+        role: 'user',
+        profile: currentName,
+        text,
+        intervention: normalizedKind,
+        receipt_state: 'accepted'
+      })
+      return true
+    } catch (error) {
+      if (!terminalReceiptRecorded) {
+        await recordControlReceipt(messageId, 'unknown', {
+          method: interventionMethod(normalizedKind),
+          error: String(error?.message || error).slice(0, 240)
+        }, claim.dispatch_token)
+      }
+      throw error
+    }
+  }
+
+  const stopAttachedRun = async confirmed => {
+    if (!attachedRun || !attachedLiveSession) return
+    if (!confirmed) {
+      setPendingConfirmedAction({ type: 'stop' })
+      return
+    }
+    const messageId = makeRequestId()
+    await rest('/control/messages', {
+      method: 'POST',
+      body: {
+        message_id: messageId,
+        run_id: attachedRun.run_id,
+        profile: currentName,
+        session_id: attachedRun.session_id,
+        kind: 'stop',
+        body: 'Stop this live Hermes run.',
+        confirmed: true,
+        permission_scope: 'inherit-only'
+      }
+    })
+    const claim = await claimControlMessage(messageId)
+    try {
+      const result = await host.request('session.interrupt', { session_id: attachedRun.runtime_session_id })
+      const gatewayStatus = String(result?.status || 'accepted')
+      const receiptState = gatewayStatus === 'rejected' ? 'rejected' : 'accepted'
+      await recordControlReceipt(messageId, receiptState, {
+        method: 'session.interrupt',
+        gateway_status: gatewayStatus
+      }, claim.dispatch_token)
+      if (receiptState === 'rejected') throw new Error('Hermes rejected this stop request')
+    } catch (error) {
+      if (String(error?.message || '') !== 'Hermes rejected this stop request') {
+        await recordControlReceipt(messageId, 'unknown', {
+          method: 'session.interrupt',
+          error: String(error?.message || error).slice(0, 240)
+        }, claim.dispatch_token)
+      }
+      throw error
+    }
+    host.notify({ kind: 'success', message: 'Stop requested. Queued prompts and pending approvals for this session are cleared by Hermes.' })
+    await controlHistoryQuery.refetch?.()
+    await activeSessionsQuery.refetch?.()
+  }
+
   const selectModel = key => {
     if (!currentName || activeJobsRef.current[currentName]) return
     const option = modelOptions.find(candidate => candidate.key === key)
@@ -1306,7 +1605,27 @@ function AgentDock({ mode = DEFAULT_DOCK_MODE, onToggleMode }) {
   const send = async () => {
     const message = draft.trim()
     const images = attachments
-    if ((!message && !images.length) || !currentName || activeJob) return
+    if ((!message && !images.length) || !currentName) return
+    if (attachedRun) {
+      if (!message || images.length) {
+        host.notify({ kind: 'error', message: 'Live-run interventions accept text only. Attachments cannot inherit the run permission scope safely.' })
+        return
+      }
+      try {
+        const dispatched = await dispatchControlMessage(interventionKind, message)
+        if (dispatched) setDraft(currentName, '')
+      } catch (error) {
+        append(currentName, {
+          id: `control-error:${makeRequestId()}`,
+          role: 'assistant',
+          profile: currentName,
+          error: true,
+          text: `Intervention was not applied: ${error?.message || error}`
+        })
+      }
+      return
+    }
+    if (activeJob) return
     const profile = currentName
     const requestId = makeRequestId()
     const sessionId = sessions[profile] || null
@@ -1737,14 +2056,77 @@ function AgentDock({ mode = DEFAULT_DOCK_MODE, onToggleMode }) {
         ]
       }),
       jsxs('div', {
-        className: 'flex shrink-0 items-center gap-1 border-b border-(--ui-stroke-secondary) px-3 py-1',
-        children: [
-          jsx('span', {
-            className: 'rounded-md bg-(--ui-control-active-background) px-2.5 py-1 text-[0.68rem] text-foreground',
-            children: 'Chat'
-          }),
-          jsx('span', { className: 'ml-auto truncate text-[0.61rem] text-(--ui-text-quaternary)', children: agentHeading })
-        ]
+        className: 'flex shrink-0 items-center gap-1.5 border-b border-(--ui-stroke-secondary) px-3 py-1.5',
+        children: attachedRun
+          ? [
+              jsx('span', {
+                className: 'size-1.5 shrink-0 rounded-full bg-(--ui-success)',
+                title: 'Attached to a real Hermes runtime session'
+              }, 'live-dot'),
+              jsx('span', {
+                className: 'min-w-0 flex-1 truncate text-[0.64rem] font-medium',
+                children: attachedLiveSession
+                  ? `Live · ${attachedLiveSession.title} · ${attachedLiveSession.status}`
+                  : 'Attached run unavailable · dispatch disabled'
+              }, 'live-title'),
+              jsx('button', {
+                className: 'text-[0.6rem] text-(--ui-text-quaternary) hover:text-foreground',
+                disabled: true,
+                title: 'UNAVAILABLE — Hermes has no verified per-run pause/resume contract',
+                type: 'button',
+                children: 'Pause unavailable'
+              }, 'pause'),
+              jsx('button', {
+                className: 'text-[0.6rem] text-(--ui-danger)',
+                disabled: !attachedLiveSession,
+                onClick: () => void stopAttachedRun(false),
+                type: 'button',
+                children: 'Stop'
+              }, 'stop'),
+              jsx('button', {
+                className: 'text-[0.6rem] text-(--ui-text-quaternary) hover:text-foreground',
+                onClick: () => rememberAttachedRun(currentName, ''),
+                type: 'button',
+                children: 'Detach'
+              }, 'detach')
+            ]
+          : liveSessions.length
+            ? [
+                jsxs(Select, {
+                  onValueChange: value => setCandidateSessionIds(current => ({ ...current, [currentName]: value })),
+                  value: candidateLiveSession?.id || '',
+                  children: [
+                    jsx(SelectTrigger, {
+                      'aria-label': 'Choose a live Hermes run to attach',
+                      className: 'h-7 min-w-0 flex-1 text-[0.65rem]',
+                      children: jsx(SelectValue, { placeholder: 'Choose live run' })
+                    }),
+                    jsx(SelectContent, {
+                      children: liveSessions.map(session => jsx(SelectItem, {
+                        value: session.id,
+                        children: `${session.title} · ${session.status}`
+                      }, session.id))
+                    })
+                  ]
+                }, 'live-select'),
+                jsx('button', {
+                  className: 'shrink-0 rounded bg-(--ui-accent) px-2 py-1 text-[0.62rem] font-medium text-(--ui-accent-foreground)',
+                  onClick: () => candidateLiveSession && void attachLiveSession(candidateLiveSession),
+                  type: 'button',
+                  children: 'Attach live'
+                }, 'attach')
+              ]
+            : [
+                jsx('span', {
+                  className: 'truncate text-[0.61rem] text-(--ui-text-quaternary)',
+                  children: currentName === runtimeProfile
+                    ? activeSessionsQuery.isError
+                      ? 'Live-run attachment unavailable on this Hermes runtime'
+                      : 'No live run for this profile · new messages start a Dock session'
+                    : `Switch Desktop to ${profileDisplayLabel(currentName)} to inspect its live runs`
+                }, 'no-live'),
+                jsx('span', { className: 'ml-auto truncate text-[0.61rem] text-(--ui-text-quaternary)', children: agentHeading }, 'heading')
+              ]
       }),
       jsxs('div', {
             className: 'flex min-h-0 flex-1 flex-col',
@@ -1795,7 +2177,7 @@ function AgentDock({ mode = DEFAULT_DOCK_MODE, onToggleMode }) {
                     accept: 'image/png,image/jpeg,image/gif,image/webp,image/bmp',
                     'aria-label': 'Choose images',
                     className: 'hidden',
-                    disabled: !currentName || Boolean(activeJob) || !supportsImageUpload,
+                    disabled: !currentName || Boolean(activeJob) || Boolean(attachedRun) || !supportsImageUpload,
                     multiple: true,
                     onChange: event => void selectImages(event),
                     ref: imageInputRef,
@@ -1820,10 +2202,117 @@ function AgentDock({ mode = DEFAULT_DOCK_MODE, onToggleMode }) {
                         }, image.id))
                       })
                     : null,
+                  attachedRun
+                    ? jsxs('div', {
+                        className: 'mb-1.5 space-y-1.5',
+                        children: [
+                          jsxs('div', {
+                            className: 'flex items-center gap-1',
+                            role: 'radiogroup',
+                            'aria-label': 'Intervention type',
+                            children: INTERVENTION_KINDS.map(kind => jsx('button', {
+                              'aria-checked': interventionKind === kind,
+                              className: cn(
+                                'rounded px-2 py-1 text-[0.62rem] font-medium',
+                                interventionKind === kind
+                                  ? 'bg-(--ui-control-active-background) text-foreground'
+                                  : 'text-(--ui-text-quaternary) hover:text-(--ui-text-secondary)'
+                              ),
+                              onClick: () => setInterventionKind(kind),
+                              role: 'radio',
+                              title: kind === 'ask'
+                                ? 'Read-only question. Available only when the run is idle.'
+                                : kind === 'nudge'
+                                  ? 'Adjust execution within the current objective at the next safe tool-result boundary.'
+                                  : 'Change the current plan or objective. Explicit confirmation required.',
+                              type: 'button',
+                              children: kind.toUpperCase()
+                            }, kind))
+                          }),
+                          jsx('p', {
+                            className: 'text-[0.58rem] leading-relaxed text-(--ui-text-quaternary)',
+                            children: interventionKind === 'ask'
+                              ? attachedLiveSession?.status === 'idle'
+                                ? 'Read-only question · run is idle'
+                                : 'ASK unavailable while working · choose NUDGE or wait for idle'
+                              : interventionKind === 'nudge'
+                                ? 'Preserves the current objective · delivered by Hermes at a safe boundary'
+                                : 'Changes plan or objective · confirmation required'
+                          }),
+                          pendingConfirmedAction
+                            ? jsxs('div', {
+                                className: 'rounded border border-(--ui-warning) bg-[color-mix(in_srgb,var(--ui-warning)_10%,transparent)] p-2 text-[0.62rem]',
+                                children: [
+                                  jsx('p', {
+                                    className: 'font-medium',
+                                    children: pendingConfirmedAction.type === 'stop'
+                                      ? 'Stop this live run?'
+                                      : 'Confirm objective-changing REDIRECT?'
+                                  }),
+                                  jsx('p', {
+                                    className: 'mt-0.5 text-(--ui-text-tertiary)',
+                                    children: pendingConfirmedAction.type === 'stop'
+                                      ? 'Hermes will interrupt the run, clear queued prompts, and deny its pending approvals.'
+                                      : 'This can change the agent plan but cannot expand its inherited tools, credentials, or approval scope.'
+                                  }),
+                                  jsxs('div', {
+                                    className: 'mt-1.5 flex justify-end gap-2',
+                                    children: [
+                                      jsx('button', {
+                                        className: 'text-(--ui-text-tertiary)',
+                                        onClick: () => setPendingConfirmedAction(null),
+                                        type: 'button',
+                                        children: 'Cancel'
+                                      }),
+                                      jsx('button', {
+                                        className: 'font-medium text-(--ui-danger)',
+                                        onClick: async () => {
+                                          const action = pendingConfirmedAction
+                                          setPendingConfirmedAction(null)
+                                          try {
+                                            if (action.type === 'stop') await stopAttachedRun(true)
+                                            else {
+                                              const dispatched = await dispatchControlMessage('redirect', action.text, true)
+                                              if (dispatched) setDraft(currentName, '')
+                                            }
+                                          } catch (error) {
+                                            append(currentName, {
+                                              id: `control-error:${makeRequestId()}`,
+                                              role: 'assistant',
+                                              profile: currentName,
+                                              error: true,
+                                              text: `Confirmed action failed safely: ${error?.message || error}`
+                                            })
+                                          }
+                                        },
+                                        type: 'button',
+                                        children: pendingConfirmedAction.type === 'stop' ? 'Confirm stop' : 'Confirm redirect'
+                                      })
+                                    ]
+                                  })
+                                ]
+                              })
+                            : null,
+                          controlHistoryQuery.data?.receipts?.length
+                            ? jsx('p', {
+                                className: 'text-[0.58rem] text-(--ui-text-quaternary)',
+                                children: `Latest receipt · ${receiptLabel(controlHistoryQuery.data.receipts.at(-1)?.state || controlHistoryQuery.data.receipts.at(-1)?.stage)} · source ${controlHistoryQuery.data.receipts.at(-1)?.source || 'unverified'}`
+                              })
+                            : jsx('p', {
+                                className: 'text-[0.58rem] text-(--ui-text-quaternary)',
+                                children: 'Proof · no application receipt observed yet'
+                              }),
+                          jsx('p', {
+                            className: 'text-[0.58rem] text-(--ui-text-quaternary)',
+                            children: `Verification · ${verificationQuery.data?.verification?.status || (verificationQuery.isError ? 'unavailable' : 'unknown')}`
+                          })
+                        ]
+                      })
+                    : null,
                   jsx(Textarea, {
                     'aria-label': `Message ${profileDisplayLabel(currentName) || 'selected agent'}`,
                     className: 'min-h-[3.25rem] max-h-32 resize-none text-xs',
-                    disabled: !currentName || Boolean(activeJob),
+                    disabled: !currentName || Boolean(activeJob) || Boolean(attachedRun && !attachedLiveSession),
                     onChange: event => setDraft(currentName, event.target.value),
                     onKeyDown: event => {
                       if (event.key === 'Enter' && !event.shiftKey) {
@@ -1832,7 +2321,9 @@ function AgentDock({ mode = DEFAULT_DOCK_MODE, onToggleMode }) {
                       }
                     },
                     onPaste: pasteImages,
-                    placeholder: currentName ? `Message ${profileDisplayLabel(currentName)}…` : 'No profiles found',
+                    placeholder: attachedRun
+                      ? `${interventionKind.toUpperCase()} ${profileDisplayLabel(currentName)} on this live run…`
+                      : currentName ? `Message ${profileDisplayLabel(currentName)}…` : 'No profiles found',
                     value: draft
                   }),
                   jsxs('div', {
@@ -1840,7 +2331,7 @@ function AgentDock({ mode = DEFAULT_DOCK_MODE, onToggleMode }) {
                     children: [
                       jsx('button', {
                         className: 'text-[0.62rem] text-(--ui-text-quaternary) hover:text-(--ui-text-secondary) disabled:opacity-40',
-                        disabled: Boolean(activeJob) || !currentName || !supportsImageUpload || attachments.length >= MAX_IMAGE_ATTACHMENTS,
+                        disabled: Boolean(activeJob) || Boolean(attachedRun) || !currentName || !supportsImageUpload || attachments.length >= MAX_IMAGE_ATTACHMENTS,
                         onClick: () => imageInputRef.current?.click(),
                         title: supportsImageUpload ? `Attach up to ${MAX_IMAGE_ATTACHMENTS} local images` : 'Image upload is unavailable',
                         type: 'button',
@@ -1848,7 +2339,7 @@ function AgentDock({ mode = DEFAULT_DOCK_MODE, onToggleMode }) {
                       }),
                       jsx('button', {
                         className: 'text-[0.62rem] text-(--ui-text-quaternary) hover:text-(--ui-text-secondary) disabled:opacity-40',
-                        disabled: Boolean(activeJob) || !messages.length,
+                        disabled: Boolean(activeJob) || Boolean(attachedRun) || !messages.length,
                         onClick: clearConversation,
                         type: 'button',
                         children: sessions[currentName] ? 'New conversation' : 'Clear'
@@ -1861,7 +2352,7 @@ function AgentDock({ mode = DEFAULT_DOCK_MODE, onToggleMode }) {
                             ? 'bg-[color-mix(in_srgb,var(--ui-accent)_18%,transparent)] text-(--ui-accent)'
                             : 'text-(--ui-text-quaternary) hover:text-(--ui-text-secondary)'
                         ),
-                        disabled: Boolean(activeJob) || !supportsKanbanAssignment,
+                        disabled: Boolean(activeJob) || Boolean(attachedRun) || !supportsKanbanAssignment,
                         onClick: () => setAssignTask(current => !current),
                         title: supportsKanbanAssignment
                           ? 'Create and track this message on the executive-organization Kanban board'
@@ -1874,10 +2365,10 @@ function AgentDock({ mode = DEFAULT_DOCK_MODE, onToggleMode }) {
                         children: 'Enter send · Shift+Enter newline'
                       }),
                       jsx(Button, {
-                        disabled: (!draft.trim() && !attachments.length) || !currentName || Boolean(activeJob),
+                        disabled: (!draft.trim() && !attachments.length) || !currentName || Boolean(activeJob) || Boolean(attachedRun && !attachedLiveSession),
                         onClick: send,
                         size: 'sm',
-                        children: assignTask ? 'Assign' : 'Send'
+                        children: attachedRun ? interventionKind.toUpperCase() : assignTask ? 'Assign' : 'Send'
                       })
                     ]
                   })

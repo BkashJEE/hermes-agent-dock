@@ -1,0 +1,80 @@
+{
+  "verified_at": "2026-08-10T05:44:27Z",
+  "status": "v0.3.0_control_plane_verified",
+  "ship_status": "ready_for_commit_with_documented_scope",
+  "tests": {
+    "node": {"passed": 29, "failed": 0, "command": "node --test tests/test_dock_state.mjs"},
+    "python": {"passed": 66, "failed": 0, "command": "python -m unittest discover -s tests -v"},
+    "javascript_syntax": "passed",
+    "python_compile": "passed",
+    "diff_check": "passed",
+    "total": {"passed": 95, "failed": 0}
+  },
+  "installation": {
+    "plugin_inventory_name": "hermes-agent-dock",
+    "plugin_inventory_status": "enabled",
+    "plugin_version": "0.3.0",
+    "source_installed_files_checked": 6,
+    "source_installed_file_parity": true,
+    "backup_created": true,
+    "files": {
+      "desktop/plugin.js": "100d16da644afb2e710b0feed1222ab2ce3b937329284ededed572336527c5b7",
+      "backend/plugin.yaml": "99a49d3fcbeadcb1de60bb92987200776c0afd53fbac520fc65c7912d217f2f4",
+      "backend/dashboard/manifest.json": "b1bf83664ce29747dfe9202cbc5e2cb851b6a7fe160637a847d7104c0dfed137",
+      "backend/dashboard/plugin_api.py": "da0991948222d20d8952c2f627ccb7b28ec840b58d306b267c3433b02ef28342",
+      "backend/dashboard/dock_runner.py": "2734efea614705545bb7d4f91f5c65477ddea57a8923fd828e2f8578f1e638a8",
+      "backend/dashboard/control_store.py": "063b7d079f1c52e3a29579d5184066559a88cec5ba9aa4d53e2406751d621912"
+    }
+  },
+  "controlled_installed_artifact_probe": {
+    "model_tokens_consumed": false,
+    "external_side_effects": false,
+    "runtime_session_binding": "passed",
+    "durable_queue": "passed",
+    "blank_receipt_id_rejected": true,
+    "receipt_transition": "unknown",
+    "receipt_retry_idempotency": "passed",
+    "privacy_reduced_events": 4,
+    "sqlite_created": true
+  },
+  "contracts": {
+    "exact_runtime_profile_binding": true,
+    "stable_and_runtime_session_ids": true,
+    "sqlite_wal_foreign_keys_busy_timeout": true,
+    "idempotent_message_ids": true,
+    "one_winner_dispatch_leases": true,
+    "ask_idle_only": true,
+    "nudge_session_steer": true,
+    "redirect_confirmation_and_session_redirect": true,
+    "stop_confirmation_and_session_interrupt": true,
+    "permission_scope": "inherit-only",
+    "accepted_is_not_applied": true,
+    "run_scoped_history": true,
+    "verification_status_read_only": true,
+    "kanban_sync_when_task_bound": true
+  },
+  "limitations": [
+    "Hermes Desktop must restart before the newly installed Python backend replaces the already-mounted v0.2.1 backend in the current process.",
+    "No per-run Pause/Resume gateway contract exists; the UI labels Pause unavailable.",
+    "Hermes emits gateway acceptance for steer/redirect but no correlated consumer application event; the Dock does not claim applied without an explicit later receipt.",
+    "Live attachment is restricted to the Desktop runtime profile currently connected to the plugin host; selecting the same display name on another channel is not identity proof.",
+    "A real active agent was not interrupted or redirected during verification; gateway mutations remain covered by source-contract tests and the controlled local ledger probe."
+  ],
+  "independent_closeout": {
+    "status": "ready",
+    "reviewed_commit": null,
+    "findings": [
+      "Runtime-session mismatch could reuse an existing stable binding.",
+      "The singleton SQLite connection was not safe across FastAPI worker threads.",
+      "Acceptance receipts could bypass claim and lease ownership.",
+      "Receipt retries could create duplicates.",
+      "Terminal run observations could regress to working.",
+      "Unknown profiles and cross-session control API access were not rejected."
+    ],
+    "accepted_findings_fixed": true,
+    "followup_delegation_id": "deleg_215d8de4",
+    "final_followup_delegation_id": "deleg_04534887",
+    "final_followup_result": "ready_no_remaining_blockers",
+    "focused_tests": {"python": 15, "node": 29}
+  }
+}

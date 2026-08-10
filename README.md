@@ -4,7 +4,7 @@ A native Hermes Desktop floating card by default for direct chat with configured
 
 > Community project. Not an official Nous Research release.
 
-**Current release:** [v0.2.1](https://github.com/BkashJEE/hermes-agent-dock/releases/tag/v0.2.1) · [Security policy](SECURITY.md) · [Third-party notices](THIRD_PARTY_NOTICES.md)
+**Current release:** v0.3.0 · [Security policy](SECURITY.md) · [Third-party notices](THIRD_PARTY_NOTICES.md)
 
 <p align="center">
   <img src="docs/assets/agent-dock-dark-cover.png" alt="Dark conceptual workflow illustration showing a busy Hermes orchestrator and direct Agent Dock paths to researcher, builder, reviewer, and vision specialists" width="100%">
@@ -18,7 +18,7 @@ Agent Dock is for people who already use more than one Hermes profile and want t
 
 ### Compatibility at a glance
 
-- **Verified:** Windows 10, Hermes Desktop, and the v0.2.1 release tests documented below.
+- **Verified:** Windows 10, Hermes Desktop, and the v0.3.0 release tests documented below.
 - **Required:** Hermes Agent with Hermes Desktop, Python 3.10+, and at least one profile returned by `hermes profile list`.
 - **Hermes v0.20.0:** open Agent Dock from the status bar or Command Palette. Pet-click activation requires a newer host that exposes `pet.actions`.
 - **Not claimed as verified in this release:** macOS or Linux installation. The installer is stdlib-only and platform-aware, but those operating systems still need direct release QA.
@@ -31,15 +31,15 @@ Agent Dock is for people who already use more than one Hermes profile and want t
    hermes profile list
    ```
 
-2. Install the exact v0.2.1 release:
+2. Install the exact v0.3.0 release:
 
    ```bash
-   git clone --branch v0.2.1 --depth 1 https://github.com/BkashJEE/hermes-agent-dock.git
+   git clone --branch v0.3.0 --depth 1 https://github.com/BkashJEE/hermes-agent-dock.git
    cd hermes-agent-dock
    python install.py
    ```
 
-3. Confirm the inventory contains `enabled user 0.2.1 hermes-agent-dock`:
+3. Confirm the inventory contains `enabled user 0.3.0 hermes-agent-dock`:
 
    ```bash
    hermes plugins list --plain --no-bundled
@@ -58,7 +58,7 @@ On Windows, the installer uses `%LOCALAPPDATA%\hermes` by default. `HERMES_HOME`
 1. Open Agent Dock and select a configured profile.
 2. Wait for that profile's provider-scoped model list to load, then confirm the model and reasoning effort.
 3. Type a message and press **Enter** or **Send**.
-4. Wait for the final response. v0.2.1 polls background jobs and does not display token-by-token streaming.
+4. Wait for the final response. Launcher mode polls background jobs and does not display token-by-token streaming.
 5. Use **New conversation** when you want a fresh session for that profile.
 
 The selected profile keeps its existing tools, memory, model/provider configuration, approval gates, session, and active job. Different profiles can run concurrently; one profile still runs one job at a time.
@@ -88,6 +88,10 @@ The selected profile keeps its existing tools, memory, model/provider configurat
 - Discovers actual Hermes profiles; it does not invent agents or pretend one profile is every specialist.
 - Uses a compact agent picker and a model selector populated from the selected profile's configured/authenticated Hermes provider. It exposes that provider's available alternatives—not an unrelated global provider catalog—and labels each model with a deterministic **Workload tier**.
 - Starts or resumes a profile-scoped Hermes session without routing through the focused orchestrator.
+- Discovers real live sessions for the Desktop's current runtime profile through `session.active_list` and lets the operator explicitly attach the Dock to one stable session/run binding without restarting it.
+- Persists attached run identity, ASK/NUDGE/confirmed REDIRECT/STOP requests, dispatch leases, privacy-reduced events, and receipts in a profile-local SQLite WAL ledger under `$HERMES_HOME/agent-dock/control-plane.sqlite3`.
+- Routes NUDGE through Hermes `session.steer`, REDIRECT through `session.redirect`, idle ASK through `prompt.submit`, and confirmed Stop through `session.interrupt`; the Dock never injects directly into a tool call.
+- Keeps acceptance distinct from application: a gateway-accepted request is not shown as applied without a later consumer-originated application receipt. Verification status comes from Hermes's read-only `verification.status` ledger.
 - Preserves a separate session ID and compact local message history per profile. Every new bubble stores and displays the viewer's local date, time to the second, and timezone; legacy messages without stored time are labeled `Date unavailable`.
 - Keeps one independent active job and draft per profile, so another agent can be opened and messaged immediately while earlier agents continue in the background. Hermes Desktop notifies when each job finishes or fails.
 - Replaces generic loading spinners with an adapted 20 px **solving** state from Jakub Antalik's MIT-licensed Thinking Orbs: one cyan hue with contrast-adjusted dark/light variants, visible only while real profile jobs are active, static under reduced-motion preferences, and paused offscreen or in hidden tabs.
@@ -101,7 +105,11 @@ The selected profile keeps its existing tools, memory, model/provider configurat
 
 - A dock message launches a **real Hermes agent session** and can consume model tokens.
 - The selected profile keeps its normal tools, policies, and approval gates. Agent Dock never adds `--yolo` or `--accept-hooks`.
-- v0.2 polls a background job and displays the final response; token-by-token streaming is not yet exposed by the public cross-profile Desktop plugin API.
+- Live attachment is allowed only when the selected profile exactly matches the active Desktop runtime profile. A matching display name alone is never treated as a cross-profile or cross-channel identity proof.
+- Control messages enforce `inherit-only` permission scope. The Dock can preserve or reduce authority but cannot add tools, credentials, filesystem scope, or approval power.
+- **ASK** is read-only and only dispatches when the run is idle. **NUDGE** preserves the objective and is delivered by Hermes at its next tool-result boundary. **REDIRECT** changes plan/objective and requires an explicit second confirmation.
+- Hermes currently exposes no verified per-run Pause/Resume contract. The Dock labels Pause unavailable instead of presenting a cosmetic control.
+- Launcher mode polls a background job and displays the final response; token-by-token streaming is not yet exposed by the public cross-profile Desktop plugin API.
 - Transient status-read failures keep the active job visible and continue reconciliation every ten seconds; only an explicit terminal response or structured not-found result clears the reservation.
 - Lost POST responses are reconciled with the stable `request_id`; an accepted backend job remains visible instead of being orphaned or duplicated.
 - Recent dock messages are best-effort renderer-local data in Hermes namespaced plugin storage—not a backup system.
@@ -140,7 +148,7 @@ No npm, pip, post-install hook, admin elevation, or package lifecycle script is 
 
 Instead of rebuilding or adapting Agent Dock, give your Hermes agent the verified release and ask it to install the exact published files:
 
-> Install Hermes Agent Dock v0.2.1 from https://github.com/BkashJEE/hermes-agent-dock for my current Hermes home. Do not recreate, rewrite, or expand the project. Inspect the release README, SECURITY.md, LICENSE, THIRD_PARTY_NOTICES.md, and `proof/live-verification.json`; confirm the repository, `v0.2.1` tag, and version metadata; run the documented tests; run `python install.py`; verify `hermes plugins list --plain --no-bundled` reports `hermes-agent-dock` enabled at v0.2.1; compare the five runtime files with the hashes in the local install manifest; and report the exact result plus whether Hermes Desktop must restart. Do not read or copy conversation content, memories, credentials, or unrelated files, and do not modify any existing profile, model, provider, tool, or approval policy.
+> Install Hermes Agent Dock v0.3.0 from https://github.com/BkashJEE/hermes-agent-dock for my current Hermes home. Do not recreate, rewrite, or expand the project. Inspect the release README, SECURITY.md, LICENSE, THIRD_PARTY_NOTICES.md, and `proof/control-plane-verification.json`; confirm the repository, `v0.3.0` tag, and version metadata; run the documented tests; run `python install.py`; verify `hermes plugins list --plain --no-bundled` reports `hermes-agent-dock` enabled at v0.3.0; compare the six runtime files with the hashes in the local install manifest; and report the exact result plus whether Hermes Desktop must restart. Do not read or copy conversation content, memories, credentials, or unrelated files, and do not modify any existing profile, model, provider, tool, or approval policy.
 
 This is an install-and-verify workflow, not a code-generation prompt. The published installer keeps a timestamped rollback backup and restores the previous desktop and backend components if replacement fails.
 
@@ -168,10 +176,12 @@ python install.py --home /path/to/temp-home --copy-only
 2. Plain-click the in-window Hermes pet to open or close the floating card on hosts that support `pet.actions`. Drag and Shift-click retain Hermes's native pet behavior. The persistent **Agent Dock** status-bar control and **Agent Dock: Toggle specialist pane** command remain fallbacks on every supported host.
 3. Use **Dock** in the card header to switch to the native bottom workspace tile, or **Undock** to return to the floating card. This mode is persisted in plugin-scoped storage and is restored the next time the Dock opens.
 4. Pick an agent from the dropdown. The model selector starts on that profile's saved model and offers the alternatives Hermes reports for the same configured provider/auth setup.
-5. Optionally use **Attach image** for up to four supported local images, then send a message or an image-only analysis request. `Enter` sends; `Shift+Enter` inserts a newline.
-6. Leave **Assign task** off for normal conversation. Enable it before sending only when the message must create and track a real Kanban card.
-7. Use **New conversation** to stop resuming that profile's previous Dock session.
-8. Use the speaker icon to mute or enable unlock sounds.
+5. If that profile owns live Desktop sessions, choose the exact session and select **Attach live**. The Dock then shows the observed status, durable run history, latest receipt, and verification status.
+6. Choose **ASK**, **NUDGE**, or **REDIRECT**. REDIRECT requires confirmation. **Stop** also requires confirmation and warns that Hermes clears queued prompts and denies pending approvals for that session.
+7. Otherwise, optionally use **Attach image** for up to four supported local images, then send a message or an image-only analysis request. `Enter` sends; `Shift+Enter` inserts a newline.
+8. Leave **Assign task** off for normal conversation. Enable it before sending only when the message must create and track a real Kanban card.
+9. Use **New conversation** to stop resuming that profile's previous Dock session.
+10. Use the speaker icon to mute or enable unlock sounds.
 
 By default the Dock is a floating card and does not change workspace geometry. In docked mode, Browser and the main workspace reflow around the bottom tile, which is resized with Hermes's native horizontal divider; Files remains independent.
 
@@ -210,6 +220,7 @@ Hermes Desktop plugin.js
   ├─ persistent `dock-mode` in ctx.storage; floating default, bottom workspace on demand
   ├─ ctx.storage: profile sessions, compact histories/attachment metadata, drafts, active jobs, mute + unlock baseline
   ├─ renderer-memory-only image selection and compact previews
+  ├─ host.request: session.active_list / steer / redirect / interrupt / verification.status
   └─ ctx.rest('/...')
        ↓ same-origin, plugin-scoped API
 Hermes plugin_api.py
@@ -220,7 +231,10 @@ Hermes plugin_api.py
   ├─ profile-keyed jobs + cancellation checks before and after process spawn
   ├─ one-hour/200-terminal-job retention
   ├─ opt-in `executive-organization` Kanban creation/lifecycle sync
+  ├─ durable `/control/*` run, queue, lease, receipt, observation, and event API
   └─ bounded sanitized response/error projection
+control_store.py
+  └─ profile-local SQLite WAL ledger with canonical bindings and immutable receipt lifecycle
 dock_runner.py
   └─ invokes profile-scoped Hermes `chat(..., images=...)` and emits one bounded JSON result
 ```
@@ -233,7 +247,7 @@ The backend launches a fixed runner path with `shell=False` and sends the reques
 node --input-type=module --check < plugin.js
 node --test tests/test_dock_state.mjs
 python -m unittest discover -s tests -v
-python -m py_compile backend/dashboard/plugin_api.py backend/dashboard/dock_runner.py install.py uninstall.py
+python -m py_compile backend/dashboard/plugin_api.py backend/dashboard/control_store.py backend/dashboard/dock_runner.py install.py uninstall.py
 ```
 
 ## Project files
@@ -241,6 +255,7 @@ python -m py_compile backend/dashboard/plugin_api.py backend/dashboard/dock_runn
 - `plugin.js` — build-free Hermes Desktop ESM runtime.
 - `backend/plugin.yaml` — standalone Hermes backend descriptor.
 - `backend/dashboard/plugin_api.py` — profile/model discovery, jobs, cancellation, diagnostics, and opt-in Kanban integration.
+- `backend/dashboard/control_store.py` — durable run identity, control queue, leases, receipts, history, status, and privacy-reduced event ledger.
 - `backend/dashboard/dock_runner.py` — JSON-stdin profile runner and bounded result serializer.
 - `install.py` / `uninstall.py` — reversible, stdlib-only lifecycle.
 - `PRODUCT_SPEC.md` — acceptance contract and explicit non-goals.
@@ -267,11 +282,14 @@ Read [CONTRIBUTING.md](CONTRIBUTING.md) before submitting. It defines the focuse
 - Public SDK support for durable backend job persistence across a full Desktop process restart.
 - Authorized cross-channel profile continuity: channel-specific transcripts with shared durable profile context and task state, plus explicit exact-session handoff between Telegram, Agent Dock, and future surfaces.
 
-## Known limitations in v0.2.1
+## Known limitations in v0.3.0
 
 - Responses appear after bounded background polling; token-by-token streaming is not available.
 - Hermes-native floating panes can move, collapse, and remember their host-owned position, but Agent Dock does not claim arbitrary freeform resizing.
 - Active backend jobs do not survive a complete Hermes Desktop process restart.
+- Attached control runs, queued interventions, receipts, and privacy-reduced events do survive restart; dispatch still requires a live Desktop gateway session with the exact runtime ID.
+- Hermes does not yet emit a correlation event proving that a particular steer/redirect changed a later plan. The Dock therefore stops at **Accepted by Hermes** unless an explicit application receipt is recorded.
+- Per-run Pause/Resume is unavailable in the current Hermes gateway and remains disabled.
 - Available models are limited to the selected profile's configured and authenticated provider.
 - Pet-click activation depends on host support for `pet.actions`; the status-bar and command-palette launchers remain the reliable fallbacks.
 - Telegram and Agent Dock currently keep separate live session transcripts. Selecting the same profile shares that profile's configuration, tools, policies, and durable memory, but does not automatically merge or resume the latest cross-channel conversation.

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import importlib.util
 import json
 import os
 import re
@@ -36,9 +37,25 @@ try:
 except ImportError:  # pragma: no cover - only for source-tree linting
     VALID_REASONING_EFFORTS = ("minimal", "low", "medium", "high", "xhigh", "max", "ultra")
 
+_CONTROL_SPEC = importlib.util.spec_from_file_location(
+    "hermes_agent_dock_control_store",
+    Path(__file__).resolve().with_name("control_store.py"),
+)
+if _CONTROL_SPEC is None or _CONTROL_SPEC.loader is None:  # pragma: no cover - installation corruption
+    raise RuntimeError("Agent Dock control store is unavailable")
+_CONTROL_MODULE = importlib.util.module_from_spec(_CONTROL_SPEC)
+_CONTROL_SPEC.loader.exec_module(_CONTROL_MODULE)
+ControlStore = _CONTROL_MODULE.ControlStore
+ControlValidationError = _CONTROL_MODULE.ValidationError
+BindingError = _CONTROL_MODULE.BindingError
+ConflictError = _CONTROL_MODULE.ConflictError
+ConfirmationRequired = _CONTROL_MODULE.ConfirmationRequired
+TransitionError = _CONTROL_MODULE.TransitionError
+LeaseError = _CONTROL_MODULE.LeaseError
+
 router = APIRouter()
 
-PLUGIN_VERSION = "0.2.1"
+PLUGIN_VERSION = "0.3.0"
 MAX_MESSAGE_CHARS = 12_000
 MAX_RESPONSE_CHARS = 120_000
 MAX_IMAGE_ATTACHMENTS = 4
@@ -63,6 +80,9 @@ _REQUEST_JOBS: dict[str, str] = {}
 _CATALOG_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
 _JOBS_LOCK = threading.RLock()
 _CATALOG_LOCK = threading.RLock()
+_CONTROL_LOCK = threading.RLock()
+_CONTROL_STORE: Any | None = None
+_CONTROL_STORE_HOME: Path | None = None
 
 
 class ImageAttachment(BaseModel):
@@ -146,6 +166,102 @@ class SendRequest(BaseModel):
 SendRequest.model_rebuild(
     _types_namespace={"ImageAttachment": ImageAttachment, "StrictBool": StrictBool}
 )
+
+
+class AttachRunRequest(BaseModel):
+    request_id: str | None = None
+    profile: str
+    runtime_profile: str
+    runtime_session_id: str
+    session_id: str
+    title: str | None = None
+    objective: str = ""
+    permission_scope: str = "inherit-only"
+    status: str = "working"
+    subagent_id: str | None = None
+    kanban_task_id: str | None = None
+
+
+class ControlMessageRequest(BaseModel):
+    message_id: str
+    run_id: str
+    profile: str
+    session_id: str
+    kind: str
+    body: str
+    confirmed: StrictBool = False
+    permission_scope: str = "inherit-only"
+
+    @field_validator("confirmed", mode="before")
+    @classmethod
+    def require_confirmation_boolean(cls, value: Any) -> bool:
+        if type(value) is not bool:
+            raise ValueError("confirmed must be a JSON boolean")
+        return value
+
+
+class ClaimMessageRequest(BaseModel):
+    dispatcher_id: str
+    profile: str
+    session_id: str
+    lease_seconds: float = Field(default=30, ge=1, le=300)
+
+
+class ReceiptRequest(BaseModel):
+    receipt_id: str
+    state: str
+    source: str
+    verification: str
+    profile: str
+    session_id: str
+    dispatch_token: str | None = None
+    source_id: str | None = None
+    detail: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("receipt_id")
+    @classmethod
+    def require_nonblank_receipt_id(cls, value: str) -> str:
+        normalized = str(value or "").strip()
+        if not normalized:
+            raise ValueError("receipt_id must be nonblank")
+        return normalized
+
+
+class ObserveRunRequest(BaseModel):
+    profile: str
+    session_id: str
+    status: str
+    heartbeat_at: float | None = None
+    detail: dict[str, Any] = Field(default_factory=dict)
+
+
+ControlMessageRequest.model_rebuild(_types_namespace={"StrictBool": StrictBool})
+ReceiptRequest.model_rebuild(_types_namespace={"Any": Any})
+ObserveRunRequest.model_rebuild(_types_namespace={"Any": Any})
+
+
+def _control_store() -> Any:
+    global _CONTROL_STORE, _CONTROL_STORE_HOME
+    home = Path(get_hermes_home()).resolve()
+    with _CONTROL_LOCK:
+        if _CONTROL_STORE is None or _CONTROL_STORE_HOME != home:
+            if _CONTROL_STORE is not None:
+                _CONTROL_STORE.close()
+            _CONTROL_STORE = ControlStore(hermes_home=home)
+            _CONTROL_STORE_HOME = home
+        return _CONTROL_STORE
+
+
+def _control_error(exc: Exception) -> HTTPException:
+    if isinstance(exc, BindingError):
+        return HTTPException(status_code=404, detail="Control run or message was not found for this binding")
+    if isinstance(exc, ConfirmationRequired):
+        return HTTPException(status_code=409, detail="Explicit confirmation is required")
+    if isinstance(exc, (ConflictError, TransitionError, LeaseError)):
+        return HTTPException(status_code=409, detail=str(exc))
+    if isinstance(exc, ControlValidationError):
+        return HTTPException(status_code=400, detail=str(exc))
+    return HTTPException(status_code=500, detail="Agent Dock control store failed safely")
 
 
 def _root_home() -> Path:
@@ -384,6 +500,29 @@ def _settle_job_kanban(job_id: str, status: str, detail: str) -> None:
             job = _JOBS.get(job_id)
             if job:
                 job["kanban_error"] = "Kanban update failed; inspect local Hermes logs"
+
+
+def _sync_control_to_orchestrator(run_id: str, message_id: str, kind: str, state: str) -> dict[str, str]:
+    """Write a privacy-reduced intervention receipt to the bound Kanban task."""
+    run = _control_store().get_run(run_id)
+    task_id = run.get("kanban_task_id") if run else None
+    if not task_id:
+        return {"state": "unavailable", "reason": "No orchestrator task is bound to this run"}
+    try:
+        kb = _kanban_module()
+        conn = kb.connect(board=KANBAN_BOARD)
+        try:
+            kb.add_comment(
+                conn,
+                task_id,
+                "agent-dock",
+                f"Agent Dock control receipt: {kind.upper()} {state}; message {message_id}; run {run_id}.",
+            )
+        finally:
+            conn.close()
+    except Exception:
+        return {"state": "failed", "reason": "Orchestrator synchronization failed; inspect local logs"}
+    return {"state": "observed", "task_id": str(task_id)}
 
 
 def _catalog_command() -> list[str]:
@@ -738,6 +877,10 @@ async def profiles() -> dict[str, Any]:
             "max_image_bytes": MAX_IMAGE_BYTES,
             "kanban_assignment": True,
             "kanban_board": KANBAN_BOARD,
+            "active_run_attachment": True,
+            "durable_control_queue": True,
+            "interventions": ["ask", "nudge", "redirect"],
+            "pause_resume": False,
         },
     }
 
@@ -752,6 +895,188 @@ def models(profile: str) -> dict[str, Any]:
         return _load_model_catalog(normalized)
     except Exception as exc:
         raise HTTPException(status_code=503, detail="Hermes model catalog is unavailable") from exc
+
+
+def _known_control_profile(profile: str) -> str:
+    try:
+        return _normalize_profile(profile)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.get("/control/runs")
+def control_runs(profile: str) -> dict[str, Any]:
+    normalized = _known_control_profile(profile)
+    try:
+        rows = _control_store().list_runs(profile=normalized)
+    except Exception as exc:
+        raise _control_error(exc) from exc
+    return {"runs": rows, "count": len(rows), "durable": True}
+
+
+@router.post("/control/runs")
+def attach_control_run(request: AttachRunRequest) -> dict[str, Any]:
+    try:
+        normalized_profile = _normalize_profile(request.profile)
+        normalized_runtime_profile = _normalize_profile(request.runtime_profile)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    if normalized_profile != normalized_runtime_profile:
+        raise HTTPException(status_code=409, detail="Selected profile does not own this Desktop runtime")
+    try:
+        return _control_store().attach_run(
+            profile=normalized_profile,
+            runtime_profile=normalized_runtime_profile,
+            session_id=request.session_id,
+            runtime_session_id=request.runtime_session_id,
+            subagent_id=request.subagent_id,
+            kanban_task_id=request.kanban_task_id,
+            source="desktop-session",
+            title=request.title,
+            objective=request.objective,
+            permission_scope=request.permission_scope,
+            status=request.status,
+        )
+    except Exception as exc:
+        raise _control_error(exc) from exc
+
+
+@router.get("/control/runs/{run_id}")
+def control_run(run_id: str, profile: str, session_id: str) -> dict[str, Any]:
+    normalized = _known_control_profile(profile)
+    try:
+        row = _control_store().get_run(run_id, profile=normalized, session_id=session_id)
+    except Exception as exc:
+        raise _control_error(exc) from exc
+    if row is None:
+        raise HTTPException(status_code=404, detail="Control run was not found")
+    return row
+
+
+@router.post("/control/runs/{run_id}/observations")
+def observe_control_run(run_id: str, request: ObserveRunRequest) -> dict[str, Any]:
+    normalized = _known_control_profile(request.profile)
+    try:
+        return _control_store().observe_run(
+            run_id,
+            profile=normalized,
+            session_id=request.session_id,
+            status=request.status,
+            heartbeat_at=request.heartbeat_at,
+            detail=request.detail,
+        )
+    except Exception as exc:
+        raise _control_error(exc) from exc
+
+
+@router.post("/control/messages", status_code=202)
+def enqueue_control_message(request: ControlMessageRequest) -> dict[str, Any]:
+    normalized = _known_control_profile(request.profile)
+    try:
+        binding = _control_store().get_run(
+            request.run_id, profile=normalized, session_id=request.session_id
+        )
+        if binding is None:
+            raise BindingError("run not found")
+        row = _control_store().enqueue_message(
+            message_id=request.message_id,
+            run_id=request.run_id,
+            kind=request.kind,
+            body=request.body,
+            confirmed=request.confirmed,
+            permission_scope=request.permission_scope,
+        )
+        return {
+            **row,
+            "orchestrator_sync": _sync_control_to_orchestrator(
+                request.run_id, request.message_id, request.kind, row["state"]
+            ),
+        }
+    except Exception as exc:
+        raise _control_error(exc) from exc
+
+
+@router.post("/control/messages/{message_id}/claim")
+def claim_control_message(message_id: str, request: ClaimMessageRequest) -> dict[str, Any]:
+    normalized = _known_control_profile(request.profile)
+    try:
+        message = _control_store().get_message(message_id)
+        if message is None:
+            raise BindingError("message not found")
+        binding = _control_store().get_run(
+            message["run_id"], profile=normalized, session_id=request.session_id
+        )
+        if binding is None:
+            raise BindingError("run not found")
+        return _control_store().claim_message(
+            message_id,
+            dispatcher_id=request.dispatcher_id,
+            lease_seconds=request.lease_seconds,
+        )
+    except Exception as exc:
+        raise _control_error(exc) from exc
+
+
+@router.post("/control/messages/{message_id}/receipts")
+def record_control_receipt(message_id: str, request: ReceiptRequest) -> dict[str, Any]:
+    normalized = _known_control_profile(request.profile)
+    try:
+        message = _control_store().get_message(message_id)
+        if message is None:
+            raise BindingError("message not found")
+        binding = _control_store().get_run(
+            message["run_id"], profile=normalized, session_id=request.session_id
+        )
+        if binding is None:
+            raise BindingError("run not found")
+        row = _control_store().record_receipt(
+            message_id=message_id,
+            receipt_id=request.receipt_id,
+            state=request.state,
+            verification=request.verification,
+            source=request.source,
+            source_id=request.source_id,
+            dispatch_token=request.dispatch_token,
+            detail=request.detail,
+        )
+        message = _control_store().get_message(message_id)
+        sync = (
+            _sync_control_to_orchestrator(
+                message["run_id"], message_id, message["kind"], row["message_state"]
+            )
+            if message
+            else {"state": "unavailable", "reason": "Message binding unavailable"}
+        )
+        return {**row, "orchestrator_sync": sync}
+    except Exception as exc:
+        raise _control_error(exc) from exc
+
+
+@router.get("/control/events")
+def control_events(
+    run_id: str,
+    profile: str,
+    session_id: str,
+    message_id: str | None = None,
+    kind: str | None = None,
+    q: str | None = None,
+    limit: int = 100,
+) -> dict[str, Any]:
+    normalized = _known_control_profile(profile)
+    try:
+        binding = _control_store().get_run(run_id, profile=normalized, session_id=session_id)
+        if binding is None:
+            raise BindingError("run not found")
+        rows = _control_store().search_events(
+            run_id=run_id,
+            message_id=message_id,
+            kind=kind,
+            q=q,
+            limit=limit,
+        )
+    except Exception as exc:
+        raise _control_error(exc) from exc
+    return {"events": rows, "count": len(rows)}
 
 
 @router.post("/jobs", status_code=202)
