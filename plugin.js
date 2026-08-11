@@ -106,6 +106,7 @@ function dockPaneData(mode) {
     ? {
         placement: 'floating',
         anchor: 'top-right',
+        surfaceRadius: 'large',
         width: '380px',
         height: '540px',
         uncloseable: true

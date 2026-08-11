@@ -130,6 +130,7 @@ test('floating mode is the explicit default and Dock/Undock mode changes are nor
   assert.deepEqual(state.dockPaneData('floating'), {
     placement: 'floating',
     anchor: 'top-right',
+    surfaceRadius: 'large',
     width: '380px',
     height: '540px',
     uncloseable: true
