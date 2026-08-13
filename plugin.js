@@ -1145,7 +1145,7 @@ function MessageBubble({ message }) {
           'aria-label': `${user
             ? message.assignment ? 'You, task assignment' : 'You'
             : profileDisplayLabel(message.profile)}, ${timestamp}`,
-          className: 'mt-0.5 flex h-4 items-center gap-1 text-[0.56rem] leading-none text-(--ui-text-quaternary)',
+          className: 'mt-0.5 flex h-4 items-center gap-1 text-[0.6rem] leading-none text-(--ui-text-tertiary)',
           'data-agent-dock-message-footer': 'true',
           children: [
             jsx('span', {
@@ -1182,7 +1182,7 @@ function MessageBubble({ message }) {
 
 function ProfileAvatar({ profile, active = false, size = 'md', label }) {
   const display = profileDisplayLabel(profile) || 'Agent'
-  const dimensions = size === 'sm' ? 'size-5 text-[0.52rem]' : 'size-7 text-[0.62rem]'
+  const dimensions = size === 'sm' ? 'size-5 text-[0.6rem]' : 'size-7 text-[0.64rem]'
   return jsxs('span', {
     'aria-label': label || `${display} avatar${active ? ', working' : ''}`,
     className: cn(
@@ -2151,7 +2151,7 @@ function AgentDock({ mode = DEFAULT_DOCK_MODE, onToggleMode }) {
                                       jsx(SelectValue, { placeholder: 'Choose agent' }),
                                       jsx('span', {
                                         className: cn(
-                                          'ml-auto shrink-0 text-[0.56rem] uppercase tracking-[0.08em]',
+                                          'ml-auto shrink-0 text-[0.6rem] uppercase tracking-[0.08em]',
                                           activeJob ? 'text-(--ui-accent)' : 'text-(--ui-text-quaternary)'
                                         ),
                                         children: selectedActivityLabel
@@ -2179,7 +2179,7 @@ function AgentDock({ mode = DEFAULT_DOCK_MODE, onToggleMode }) {
                                           jsx('span', { children: profileDisplayLabel(profile.name) }),
                                           jsx('span', {
                                             className: cn(
-                                              'ml-auto pl-3 text-[0.56rem] uppercase tracking-[0.08em]',
+                                              'ml-auto pl-3 text-[0.6rem] uppercase tracking-[0.08em]',
                                               profileWorking ? 'text-(--ui-accent)' : 'text-(--ui-text-quaternary)'
                                             ),
                                             children: profileStatus
@@ -2285,7 +2285,7 @@ function AgentDock({ mode = DEFAULT_DOCK_MODE, onToggleMode }) {
                                             children: [
                                               jsx('span', { className: 'min-w-0 truncate', children: compactModelLabel(presentation.label) }),
                                               jsx(Badge, {
-                                                className: 'ml-auto shrink-0 px-1 text-[0.56rem]',
+                                                className: 'ml-auto shrink-0 px-1 text-[0.6rem]',
                                                 title: `Workload tier: ${presentation.tierLabel}`,
                                                 variant: 'outline',
                                                 children: presentation.tierLabel
@@ -2339,7 +2339,7 @@ function AgentDock({ mode = DEFAULT_DOCK_MODE, onToggleMode }) {
                                               value: reasoningEffortSliderPosition(effort)
                                             }),
                                             jsxs('div', {
-                                              className: 'flex items-center justify-between text-[0.54rem] text-(--ui-text-quaternary)',
+                                              className: 'flex items-center justify-between text-[0.6rem] text-(--ui-text-tertiary)',
                                               children: [
                                                 jsx('span', { children: 'Low' }),
                                                 jsx('span', { children: 'Medium' }),
@@ -2373,7 +2373,7 @@ function AgentDock({ mode = DEFAULT_DOCK_MODE, onToggleMode }) {
                                 jsx(Codicon, { name: expandedSubagents[currentName] === true ? 'chevron-down' : 'chevron-right', size: '0.68rem' }),
                                 jsx('span', { children: `Subagents (${visibleSubagents.length})` }),
                                 jsx('span', {
-                                  className: 'ml-auto text-[0.56rem] uppercase tracking-[0.08em] text-(--ui-text-quaternary)',
+                                  className: 'ml-auto text-[0.6rem] uppercase tracking-[0.08em] text-(--ui-text-tertiary)',
                                   children: visibleSubagents.some(child => child.status === 'running') ? 'Running' : 'Finished'
                                 })
                               ]
@@ -2403,7 +2403,7 @@ function AgentDock({ mode = DEFAULT_DOCK_MODE, onToggleMode }) {
                                         ]
                                       }),
                                       jsxs('div', {
-                                        className: 'mt-1 flex min-w-0 items-center gap-1.5 text-[0.56rem] text-(--ui-text-quaternary)',
+                                        className: 'mt-1 flex min-w-0 items-center gap-1.5 text-[0.6rem] text-(--ui-text-tertiary)',
                                         children: [
                                           jsx('span', { children: child.model || 'Model unavailable' }),
                                           jsx('span', { 'aria-hidden': true, children: '·' }),
