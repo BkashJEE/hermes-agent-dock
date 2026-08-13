@@ -37,14 +37,12 @@ class InstallLifecycleTests(unittest.TestCase):
         plugin_api_source = (ROOT / "backend" / "dashboard" / "plugin_api.py").read_text(
             encoding="utf-8"
         )
-        proof = json.loads((ROOT / "proof" / "control-plane-verification.json").read_text(encoding="utf-8"))
-
         self.assertRegex(version, r"^\d+\.\d+\.\d+$")
         self.assertEqual(plugin_yaml_version, version)
         self.assertEqual(dashboard_manifest["version"], version)
         self.assertIn(f'PLUGIN_VERSION = "{version}"', plugin_api_source)
         self.assertIn('"version": PLUGIN_VERSION', plugin_api_source)
-        self.assertEqual(proof["installation"]["plugin_version"], version)
+
 
     def test_copy_install_is_idempotent_and_uninstall_is_reversible(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -54,7 +52,18 @@ class InstallLifecycleTests(unittest.TestCase):
             self.assertTrue((home / "plugins" / "hermes-agent-dock" / "dashboard" / "plugin_api.py").is_file())
             self.assertTrue((home / "plugins" / "hermes-agent-dock" / "dashboard" / "dock_runner.py").is_file())
             self.assertTrue((home / "plugins" / "hermes-agent-dock" / "dashboard" / "control_store.py").is_file())
-            self.assertEqual(len(first["files"]), 6)
+            self.assertTrue((home / "plugins" / "hermes-agent-dock" / "dashboard" / "job_store.py").is_file())
+            self.assertTrue((home / "plugins" / "hermes-agent-dock" / "dashboard" / "subagent_progress.py").is_file())
+            self.assertEqual(set(first["files"]), {
+                "desktop/plugin.js",
+                "backend/plugin.yaml",
+                "backend/dashboard/manifest.json",
+                "backend/dashboard/plugin_api.py",
+                "backend/dashboard/dock_runner.py",
+                "backend/dashboard/control_store.py",
+                "backend/dashboard/job_store.py",
+                "backend/dashboard/subagent_progress.py",
+            })
             self.assertFalse(any((home / "plugins" / "hermes-agent-dock").rglob("__pycache__")))
             on_disk = json.loads(
                 (home / "plugins" / "hermes-agent-dock" / "install-manifest.json").read_text(

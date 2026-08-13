@@ -7,9 +7,12 @@ import inspect
 import json
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
+
+REAL_THREAD = threading.Thread
 
 from pydantic import ValidationError
 
@@ -61,9 +64,19 @@ CATALOG = {
 
 class BackendSecurityTests(unittest.TestCase):
     def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.home = Path(self.temp_dir.name)
+        self.home_patch = patch.object(api, "get_hermes_home", return_value=self.home)
+        self.home_patch.start()
+        api._reset_job_store_for_tests()
         api._JOBS.clear()
         api._REQUEST_JOBS.clear()
         api._CATALOG_CACHE.clear()
+
+    def tearDown(self):
+        api._reset_job_store_for_tests()
+        self.home_patch.stop()
+        self.temp_dir.cleanup()
 
     def request(self, **overrides):
         values = {
@@ -87,6 +100,32 @@ class BackendSecurityTests(unittest.TestCase):
             _profile_rows=Mock(return_value=PROFILE_ROWS),
             _load_model_catalog=Mock(return_value=CATALOG),
         )
+
+    def seed_durable_job(self, job_id, request):
+        row, created = api._job_store().reserve_job(
+            job_id=job_id,
+            profile_id=request.profile,
+            request_id=request.request_id,
+            provider=request.provider,
+            model=request.model,
+            reasoning_effort=request.reasoning_effort,
+            fast=request.fast,
+            assign_task=request.assign_task,
+            image_count=len(request.images),
+            session_id=request.session_id,
+            kanban_task_id=None,
+            kanban_board=None,
+        )
+        self.assertTrue(created)
+        api._JOBS[job_id] = api._memory_job_from_row(row)
+        return api._JOBS[job_id]
+
+    def cancel_seeded_job(self, job_id):
+        job = api._JOBS[job_id]
+        token = job["_attempt_token"]
+        self.assertTrue(api._job_store().request_cancel(job_id, token))
+        self.assertTrue(api._job_store().complete_cancelled(job_id, token))
+        job.update({"status": "cancelled", "finished_at": 1})
 
     def test_build_command_keeps_prompt_out_of_argv(self):
         hostile = "hello; rm -rf / && $(whoami)"
@@ -207,7 +246,7 @@ class BackendSecurityTests(unittest.TestCase):
                 return "image reply", "session_id: 20260805_010203_image\n"
 
         process = FakeProcess()
-        api._JOBS["job-image"] = {"id": "job-image", "status": "starting", "kanban_task_id": None}
+        self.seed_durable_job("job-image", request)
         with tempfile.TemporaryDirectory() as directory:
             home = Path(directory)
             with patch.object(api, "_build_command", return_value=[sys.executable, "runner", "--chat"]), patch.object(
@@ -295,6 +334,22 @@ class BackendSecurityTests(unittest.TestCase):
         self.assertEqual(error, "Agent session failed: Hermes runner failed; inspect local Hermes logs")
         self.assertNotIn("secret-token-value", error)
 
+    def test_runner_error_redacts_credentials_and_private_paths(self):
+        bearer = "SUPER" + "SECRET_BEARER_123456"
+        error = api._safe_runner_error(
+            f"authorization: Bearer {bearer} "
+            "C:\\Users\\Alice\\My Documents\\board.sqlite; "
+            "\\\\server\\share\\private\\board.sqlite; "
+            "/tmp/private/runner.log",
+            1,
+        )
+        self.assertNotIn(bearer, error)
+        self.assertNotIn("Alice", error)
+        self.assertNotIn("server", error)
+        self.assertNotIn("/tmp/", error)
+        self.assertIn("[REDACTED]", error)
+        self.assertIn("[PRIVATE_PATH]", error)
+
     def test_run_job_pipes_exact_json_request_to_runner_stdin(self):
         class FakeProcess:
             returncode = 0
@@ -309,11 +364,7 @@ class BackendSecurityTests(unittest.TestCase):
 
         process = FakeProcess()
         request = self.request(message="live transport probe")
-        api._JOBS["job-transport"] = {
-            "id": "job-transport",
-            "status": "starting",
-            "kanban_task_id": None,
-        }
+        self.seed_durable_job("job-transport", request)
         with patch.object(api, "_build_command", return_value=[sys.executable, "runner", "--chat"]), patch.object(
             api, "_catalog_environment", return_value={"HERMES_HOME": "C:/profile"}
         ), patch.object(api.subprocess, "Popen", return_value=process) as popen:
@@ -324,16 +375,27 @@ class BackendSecurityTests(unittest.TestCase):
         self.assertEqual(api._JOBS["job-transport"]["status"], "done")
         self.assertEqual(api._JOBS["job-transport"]["response"], "agent reply")
 
-    def test_cancellation_during_command_build_prevents_process_spawn(self):
-        request = self.request(message="cancel before spawn")
-        api._JOBS["job-cancel-build"] = {
-            "id": "job-cancel-build",
+    def test_run_job_without_durable_row_fails_closed(self):
+        request = self.request(message="must not run from memory alone")
+        api._JOBS["memory-only-job"] = {
+            "id": "memory-only-job",
             "status": "starting",
             "kanban_task_id": None,
         }
+        with patch.object(api.subprocess, "Popen") as popen, patch.object(
+            api, "_settle_job_kanban"
+        ) as settle:
+            api._run_job("memory-only-job", request)
+        popen.assert_not_called()
+        settle.assert_not_called()
+        self.assertEqual(api._JOBS["memory-only-job"]["status"], "starting")
+
+    def test_cancellation_during_command_build_prevents_process_spawn(self):
+        request = self.request(message="cancel before spawn")
+        self.seed_durable_job("job-cancel-build", request)
 
         def cancel_during_build(_request):
-            api._JOBS["job-cancel-build"]["status"] = "cancelled"
+            self.cancel_seeded_job("job-cancel-build")
             return [sys.executable, "runner", "--chat"]
 
         with patch.object(api, "_build_command", side_effect=cancel_during_build), patch.object(
@@ -347,14 +409,10 @@ class BackendSecurityTests(unittest.TestCase):
     def test_cancellation_between_spawn_and_attach_terminates_process(self):
         process = Mock()
         request = self.request(message="cancel after spawn")
-        api._JOBS["job-cancel-attach"] = {
-            "id": "job-cancel-attach",
-            "status": "starting",
-            "kanban_task_id": None,
-        }
+        self.seed_durable_job("job-cancel-attach", request)
 
         def spawn_then_cancel(**_kwargs):
-            api._JOBS["job-cancel-attach"]["status"] = "cancelled"
+            self.cancel_seeded_job("job-cancel-attach")
             return process
 
         with patch.object(api, "_build_command", return_value=[sys.executable, "runner", "--chat"]), patch.object(
@@ -486,6 +544,61 @@ class BackendSecurityTests(unittest.TestCase):
             "Kanban assignment failed; inspect local Hermes logs",
         )
         self.assertNotIn(private_path, raised.exception.detail)
+        rows = api._job_store().list_jobs()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["status"], "error")
+        self.assertEqual(
+            rows[0]["error_summary"],
+            "Kanban assignment failed; inspect local Hermes logs",
+        )
+
+    @patch.object(api.threading, "Thread")
+    def test_slow_kanban_assignment_does_not_hold_sqlite_write_lock(self, _thread_cls):
+        request = self.request(request_id="req-slow-kanban-123", assign_task=True)
+        callback_started = threading.Event()
+        release_callback = threading.Event()
+        result = []
+        errors = []
+
+        def slow_assignment(_request, _job_id):
+            callback_started.set()
+            if not release_callback.wait(timeout=5):
+                raise RuntimeError("test callback timed out")
+            return "t_slow_assignment"
+
+        def submit():
+            try:
+                result.append(api.create_job(request))
+            except BaseException as exc:
+                errors.append(exc)
+
+        with self.validation(), patch.object(
+            api, "_create_kanban_task", side_effect=slow_assignment
+        ):
+            submitter = REAL_THREAD(target=submit)
+            submitter.start()
+            self.assertTrue(callback_started.wait(timeout=5))
+            other, created = api._job_store().reserve_job(
+                job_id="other-job",
+                profile_id="jarvis",
+                request_id="req-independent-write-123",
+                provider="openai-codex",
+                model="gpt-5.6-codex",
+                reasoning_effort="none",
+                fast=False,
+                assign_task=False,
+                image_count=0,
+                session_id=None,
+                kanban_task_id=None,
+                kanban_board=None,
+            )
+            self.assertTrue(created)
+            self.assertEqual(other["job_id"], "other-job")
+            release_callback.set()
+            submitter.join(timeout=5)
+        self.assertFalse(submitter.is_alive())
+        self.assertEqual(errors, [])
+        self.assertEqual(result[0]["kanban_task_id"], "t_slow_assignment")
 
     @patch.object(api, "_profile_rows", return_value=[])
     def test_profiles_advertises_native_controls(self, _rows):
@@ -532,6 +645,109 @@ class BackendSecurityTests(unittest.TestCase):
         command.assert_not_called()
         self.assertEqual(thread_cls.call_count, 1)
 
+    @patch.object(api.threading, "Thread")
+    def test_duplicate_after_store_reopen_bypasses_catalog_and_starts_no_worker(self, thread_cls):
+        request = self.request(request_id="req-restart-duplicate-123")
+        with patch.object(api, "_build_command", return_value=[sys.executable, "runner", "--chat"]):
+            first = api.create_job(request)
+        api._reset_job_store_for_tests(clear_memory=True)
+        with patch.object(api, "_build_command", side_effect=RuntimeError("catalog unavailable")) as command:
+            second = api.create_job(request)
+        self.assertEqual(first["id"], second["id"])
+        self.assertEqual(second["status"], "interrupted")
+        command.assert_not_called()
+        self.assertEqual(thread_cls.call_count, 1)
+
+    @patch.object(api.threading, "Thread")
+    def test_concurrent_api_submissions_reserve_once_and_start_one_worker(self, thread_cls):
+        request = self.request(request_id="req-concurrent-api-123", assign_task=True)
+        results = []
+        errors = []
+        barrier = threading.Barrier(2)
+
+        def submit():
+            try:
+                barrier.wait(timeout=5)
+                results.append(api.create_job(request))
+            except BaseException as exc:
+                errors.append(exc)
+
+        with patch.object(api, "_build_command", return_value=[sys.executable, "runner", "--chat"]), patch.object(
+            api, "_create_kanban_task", return_value="t_concurrent_once"
+        ) as create_kanban:
+            workers = [REAL_THREAD(target=submit) for _ in range(2)]
+            for worker in workers:
+                worker.start()
+            for worker in workers:
+                worker.join(timeout=10)
+        self.assertFalse(any(worker.is_alive() for worker in workers))
+        self.assertEqual(errors, [])
+        self.assertEqual(len(results), 2)
+        self.assertEqual({result["id"] for result in results}, {results[0]["id"]})
+        self.assertEqual(thread_cls.call_count, 1)
+        create_kanban.assert_called_once_with(request, results[0]["id"])
+        self.assertEqual(results[0]["kanban_task_id"], "t_concurrent_once")
+
+    @patch.object(api.threading, "Thread")
+    def test_durable_lookup_and_cancellation_survive_memory_loss(self, thread_cls):
+        request = self.request(request_id="req-durable-lookup-123")
+        with patch.object(api, "_build_command", return_value=[sys.executable, "runner", "--chat"]):
+            created = api.create_job(request)
+        api._JOBS.clear()
+        api._REQUEST_JOBS.clear()
+        recovered = asyncio.run(api.get_job(created["id"]))
+        self.assertEqual(recovered["id"], created["id"])
+        cancelled = asyncio.run(api.cancel_job(created["id"]))
+        self.assertEqual(cancelled["status"], "cancelled")
+        api._reset_job_store_for_tests(clear_memory=True)
+        self.assertEqual(asyncio.run(api.get_job(created["id"]))["status"], "cancelled")
+
+    @patch.object(api.threading, "Thread")
+    def test_invalid_new_request_creates_no_durable_row(self, thread_cls):
+        request = self.request(request_id="req-invalid-new-123", model="not-configured")
+        with self.validation(), self.assertRaises(api.HTTPException):
+            api.create_job(request)
+        self.assertEqual(api._job_store().list_jobs(), [])
+        thread_cls.assert_not_called()
+
+    @patch.object(api.threading, "Thread")
+    def test_public_job_and_sqlite_omit_private_execution_content(self, thread_cls):
+        prompt = "PRIVATE_PROMPT_SENTINEL C:\\Users\\Private\\capture.png"
+        image_sentinel = b"PRIVATE_IMAGE_SENTINEL"
+        png = bytes.fromhex("89504e470d0a1a0a") + image_sentinel
+        request = self.request(
+            message=prompt,
+            request_id="req-private-ledger-123",
+            images=[{
+                "name": "C:\\Users\\Private\\capture.png",
+                "mime_type": "image/png",
+                "data_url": "data:image/png;base64," + base64.b64encode(png).decode("ascii"),
+            }],
+        )
+        with patch.object(api, "_build_command", return_value=[sys.executable, "runner", "--chat"]):
+            public = api.create_job(request)
+        self.assertFalse({"attempt_token", "_attempt_token", "_process"} & set(public))
+        database = api._job_store().database_path
+        api._reset_job_store_for_tests(clear_memory=False)
+        raw = database.read_bytes()
+        for sentinel in (prompt.encode(), image_sentinel, b"PRIVATE_PROMPT_SENTINEL", b"capture.png"):
+            self.assertNotIn(sentinel, raw)
+
+    @patch.object(api.threading, "Thread")
+    def test_stale_attempt_after_reopen_cannot_settle_kanban(self, thread_cls):
+        request = self.request(request_id="req-stale-settlement-123")
+        with patch.object(api, "_build_command", return_value=[sys.executable, "runner", "--chat"]):
+            created = api.create_job(request)
+        old_token = api._JOBS[created["id"]]["_attempt_token"]
+        self.assertTrue(api._job_store().mark_running(created["id"], old_token))
+        api._reset_job_store_for_tests(clear_memory=False)
+        with patch.object(api, "_settle_job_kanban") as settle, patch.object(
+            api, "_build_command", return_value=[sys.executable, "runner", "--chat"]
+        ):
+            api._run_job(created["id"], request)
+        settle.assert_not_called()
+        self.assertEqual(api._job_store().get_job(created["id"])["status"], "interrupted")
+
     def test_achievement_projection_omits_private_evidence(self):
         with tempfile.TemporaryDirectory() as directory:
             home = Path(directory)
@@ -567,6 +783,163 @@ class BackendSecurityTests(unittest.TestCase):
             self.assertNotIn("PRIVATE SESSION TITLE", serialized)
             self.assertNotIn("secret-session", serialized)
             self.assertNotIn("evidence", result["items"][0])
+
+    def test_subagent_refresh_rejects_malformed_prestart_and_cross_job_jsonl(self):
+        job_id = "job-parent"
+        with tempfile.TemporaryDirectory() as directory:
+            progress_path = Path(directory) / "progress.jsonl"
+            rows = [
+                "not json",
+                {
+                    "event": "subagent.tool",
+                    "subagent_id": f"{job_id}:subagent:0",
+                    "task_index": 0,
+                    "status": "running",
+                    "started_at": 10,
+                    "updated_at": 11,
+                    "finished_at": None,
+                    "current_tool": "terminal",
+                    "duration_seconds": 1,
+                },
+                {
+                    "event": "subagent.start",
+                    "subagent_id": "other-parent:subagent:0",
+                    "task_index": 0,
+                    "status": "running",
+                    "started_at": 10,
+                    "updated_at": 10,
+                    "finished_at": None,
+                    "current_tool": None,
+                    "duration_seconds": 0,
+                },
+                {
+                    "event": "subagent.start",
+                    "subagent_id": f"{job_id}:subagent:0",
+                    "task_index": 0,
+                    "status": "running",
+                    "started_at": 10,
+                    "updated_at": 10,
+                    "finished_at": None,
+                    "current_tool": None,
+                    "duration_seconds": 0,
+                },
+                {
+                    "event": "subagent.complete",
+                    "subagent_id": f"{job_id}:subagent:0",
+                    "task_index": 0,
+                    "status": "completed",
+                    "started_at": 10,
+                    "updated_at": 12,
+                    "finished_at": 12,
+                    "current_tool": None,
+                    "duration_seconds": 2,
+                },
+                {
+                    "event": "subagent.complete",
+                    "subagent_id": f"{job_id}:subagent:0",
+                    "task_index": 0,
+                    "status": "completed",
+                    "started_at": 10,
+                    "updated_at": 12,
+                    "finished_at": 12,
+                    "current_tool": None,
+                    "duration_seconds": 2,
+                    "prompt": "PRIVATE PROMPT",
+                },
+                {
+                    "event": "subagent.progress",
+                    "subagent_id": f"{job_id}:subagent:0",
+                    "task_index": 0,
+                    "status": "running",
+                    "started_at": 10,
+                    "updated_at": 13,
+                    "finished_at": None,
+                    "current_tool": "terminal",
+                    "duration_seconds": 3,
+                },
+            ]
+            progress_path.write_text(
+                "\n".join(row if isinstance(row, str) else json.dumps(row) for row in rows) + "\n",
+                encoding="utf-8",
+            )
+            job = {
+                "id": job_id,
+                "subagents": [],
+                "_subagent_progress_path": progress_path,
+                "_subagent_started_ids": set(),
+            }
+            api._refresh_subagents(job)
+
+        self.assertEqual(len(job["subagents"]), 1)
+        child = job["subagents"][0]
+        self.assertEqual(child["subagent_id"], f"{job_id}:subagent:0")
+        self.assertEqual(child["status"], "completed")
+        self.assertIsNone(child["current_tool"])
+        self.assertNotIn("event", child)
+        self.assertNotIn("prompt", child)
+        self.assertNotIn("summary", child)
+        self.assertIsNone(child["model"])
+        self.assertIsNone(child["api_calls"])
+        self.assertIsNone(child["total_tokens"])
+        self.assertEqual(child["usage_state"], "unavailable")
+        self.assertFalse(child["direct_chat_available"])
+        public = api._public_job(job)
+        self.assertEqual(public["subagents"], [child])
+        self.assertNotIn("_subagent_progress_path", public)
+        self.assertNotIn("_subagent_started_ids", public)
+
+    def test_subagent_progress_file_is_removed_with_evicted_job(self):
+        with tempfile.TemporaryDirectory() as directory:
+            progress_path = Path(directory) / "job.jsonl"
+            progress_path.write_text("{}\n", encoding="utf-8")
+            now = 10_000
+            api._JOBS["job-cleanup"] = {
+                "id": "job-cleanup",
+                "status": "done",
+                "finished_at": now - api.JOB_RETENTION_SECONDS - 1,
+                "_subagent_progress_path": progress_path,
+            }
+            api._evict_completed_jobs(now=now)
+            self.assertFalse(progress_path.exists())
+            self.assertNotIn("job-cleanup", api._JOBS)
+
+    def test_rehydrated_interrupted_job_restores_children_without_replay(self):
+        with tempfile.TemporaryDirectory() as directory:
+            profile_home = Path(directory) / "profiles" / "jarvis"
+            progress_path = profile_home / "cache" / "agent-dock-progress" / "job-restart.jsonl"
+            progress_path.parent.mkdir(parents=True)
+            progress_path.write_text(json.dumps({
+                "event": "subagent.start",
+                "subagent_id": "job-restart:subagent:0",
+                "task_index": 0,
+                "status": "running",
+                "started_at": 10,
+                "updated_at": 10,
+                "finished_at": None,
+                "current_tool": None,
+                "duration_seconds": 0,
+                "model": None,
+                "api_calls": None,
+                "input_tokens": None,
+                "output_tokens": None,
+                "total_tokens": None,
+                "usage_state": "unavailable",
+                "direct_chat_available": False,
+            }) + "\n", encoding="utf-8")
+            row = {
+                "job_id": "job-restart",
+                "profile_id": "jarvis",
+                "status": "interrupted",
+                "attempt_token": "attempt",
+                "created_at": 10,
+                "finished_at": 20,
+            }
+            with patch.object(api, "_profile_home", return_value=profile_home):
+                job = api._memory_job_from_row(row)
+            self.assertEqual(len(job["subagents"]), 1)
+            self.assertEqual(job["subagents"][0]["status"], "interrupted")
+            self.assertEqual(job["subagents"][0]["finished_at"], 20)
+            self.assertIsNone(job["subagents"][0]["current_tool"])
 
 
 if __name__ == "__main__":

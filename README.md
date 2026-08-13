@@ -4,7 +4,7 @@ A native Hermes Desktop floating card by default for direct chat with configured
 
 > Community project. Not an official Nous Research release.
 
-**Current release:** v0.3.0 · [Security policy](SECURITY.md) · [Third-party notices](THIRD_PARTY_NOTICES.md)
+**Release candidate:** v0.4.0 (local, not yet published) · [Security policy](SECURITY.md) · [Third-party notices](THIRD_PARTY_NOTICES.md)
 
 <p align="center">
   <img src="docs/assets/agent-dock-dark-cover.png" alt="Dark conceptual workflow illustration showing a busy Hermes orchestrator and direct Agent Dock paths to researcher, builder, reviewer, and vision specialists" width="100%">
@@ -94,12 +94,21 @@ The selected profile keeps its existing tools, memory, model/provider configurat
 - Keeps acceptance distinct from application: a gateway-accepted request is not shown as applied without a later consumer-originated application receipt. Verification status comes from Hermes's read-only `verification.status` ledger.
 - Preserves a separate session ID and compact local message history per profile. Every new bubble stores and displays the viewer's local date, time to the second, and timezone; legacy messages without stored time are labeled `Date unavailable`.
 - Keeps one independent active job and draft per profile, so another agent can be opened and messaged immediately while earlier agents continue in the background. Hermes Desktop notifies when each job finishes or fails.
+- Uses one deterministic profile-ID-derived avatar in the selector, assistant messages, and working state; the unchanged raw profile ID remains the routing authority.
 - Replaces generic loading spinners with an adapted 20 px **solving** state from Jakub Antalik's MIT-licensed Thinking Orbs: one cyan hue with contrast-adjusted dark/light variants, visible only while real profile jobs are active, static under reduced-motion preferences, and paused offscreen or in hidden tabs.
 - Accepts up to four local PNG, JPEG, GIF, WebP, or BMP images (10 MB each, 25 MB total) and passes them through Hermes's native `chat(..., images=...)` path. Image bytes are job-scoped and removed after completion, failure, or cancellation.
 - Displays each selected agent's final reply or a bounded actionable failure inside the Dock transcript.
 - Creates a real card on the `executive-organization` Hermes Kanban board only when **Assign task** is active; ordinary chat never creates a card.
 - Keeps the linked card synchronized with the Dock job and settles captured responses as `blocked / needs_input` for Dad/CEO verification rather than falsely declaring the task complete.
 - Optionally plays a deduplicated achievement unlock chime; first load establishes a silent baseline and a persistent mute control is available.
+- Shows a compact **Subagents (N)** tree only after Hermes emits an authoritative
+  start event for the exact parent job. Child rows expose bounded lifecycle
+  state, a safe current-tool label, model/API calls, and reported input/output
+  token totals when Hermes supplies them.
+- Reconciles profile-local durable job reservations after restart without
+  relaunching uncertain work, and requires explicit exact-runtime reattachment.
+- Uses compact attachment chips and assistant-only Copy; history retains neither
+  image bytes nor private source paths, and the Dock intentionally has no Retry.
 
 ## Important boundaries
 
@@ -116,6 +125,13 @@ The selected profile keeps its existing tools, memory, model/provider configurat
 - Pending image bytes remain only in renderer memory until submission. History stores attachment names/metadata, never base64 payloads, and the backend deletes each job's temporary image directory in `finally`.
 - Explicit assignment requires the local `executive-organization` Kanban board and a valid `request_id`. The card records the accountable profile, stable Dock job identity, and idempotency key. Request retries reuse the existing job/card during the bounded retention window; terminal jobs are retained for up to one hour, subject to a 200-job cap, while active jobs are never evicted.
 - Achievement integration is optional. It reads the local `hermes-achievements/scan_snapshot.json` and intentionally omits evidence, session IDs, and session titles.
+- Subagent prompts, goals, summaries, reasoning, tool arguments/results,
+  commands, credentials, private paths, stderr, and transcripts never enter the
+  public child projection. Missing token usage is **Unavailable**, not zero.
+- The subprocess runner does not possess Hermes's exact in-process gateway
+  transport authority for a live child. Child rows therefore show **Direct chat
+  unavailable**; Agent Dock never routes a child message through the parent or
+  spawns a replacement child while pretending it is the original.
 
 ## Requirements
 

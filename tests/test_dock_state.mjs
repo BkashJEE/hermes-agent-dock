@@ -9,8 +9,10 @@ const exported = [
   'activeJobActivities',
   'activitySummary',
   'appendUniqueMessage',
+  'attachmentDisplayName',
   'buildJobPayload',
   'compactModelLabel',
+  'copyTextToClipboard',
   'dockModeAction',
   'dockPaneData',
   'extractClipboardImageFiles',
@@ -19,18 +21,24 @@ const exported = [
   'groupModelOptions',
   'interventionMethod',
   'interventionNeedsConfirmation',
+  'buildRebindPayload',
+  'exactRuntimeProfile',
   'liveSessionsForProfile',
+  'messageAttachmentMetadata',
   'migrateSavedModelSelections',
   'modelOptionKey',
   'modelPresentation',
   'nextDockMode',
   'normalizeDockMode',
   'normalizeInterventionKind',
+  'normalizeRuntimeProfile',
   'reasoningEffortForSliderPosition',
   'reasoningEffortSliderPosition',
   'profileActivityLabel',
+  'profileAvatarInitials',
   'profileDisplayLabel',
   'receiptLabel',
+  'rebindCandidateForRun',
   'reconcileIdempotentSubmission',
   'pruneExpiredStartingJobs',
   'removeProfileJob',
@@ -43,7 +51,9 @@ const exported = [
   'submitWithIdempotentRetry',
   'upsertProfileJob',
   'validateImageFileMetadata',
-  'workingProfileNames'
+  'workingProfileNames',
+  'normalizeSubagents',
+  'updateProfileSubagents'
 ].join(', ')
 const state = await import(`data:text/javascript;base64,${Buffer.from(`${helpers}\nexport { ${exported} }`).toString('base64')}`)
 
@@ -69,6 +79,84 @@ const catalog = {
   ]
 }
 
+test('subagent disclosure keeps the compact public allowlist and exact job snapshot', () => {
+  const rows = [
+    {
+      subagent_id: 'job-a:subagent:1',
+      task_index: 1,
+      status: 'running',
+      current_tool: 'terminal',
+      started_at: 10,
+      updated_at: 11,
+      finished_at: null,
+      duration_seconds: 3,
+      model: 'gpt-5.6-luna',
+      api_calls: 4,
+      input_tokens: 100,
+      output_tokens: 25,
+      total_tokens: 125,
+      usage_state: 'reported',
+      direct_chat_available: true,
+      prompt: 'PRIVATE PROMPT',
+      goal: 'PRIVATE GOAL',
+      summary: 'PRIVATE SUMMARY',
+      reasoning: 'PRIVATE REASONING',
+      tool_args: { command: 'PRIVATE ARGS' },
+      tool_result: 'PRIVATE RESULT',
+      path: 'C:/private/path',
+      credentials: 'PRIVATE CREDENTIAL',
+      model: 'private-model',
+      api_calls: 7,
+      tokens: { input: 11, output: 13 }
+    },
+    {
+      subagent_id: 'job-a:subagent:0',
+      task_index: 0,
+      status: 'completed',
+      current_tool: null,
+      started_at: 1,
+      updated_at: 3,
+      finished_at: 3,
+      duration_seconds: 2,
+      model: 'private-model',
+      api_calls: 0,
+      tokens: { input: 0, output: 0 }
+    },
+    { subagent_id: 'job-a:subagent:2', task_index: 2, status: 'unknown' },
+    { subagent_id: 'job-a:subagent:bad', task_index: '2', status: 'running' }
+  ]
+  const normalized = state.normalizeSubagents(rows)
+  assert.deepEqual(normalized.map(row => row.task_index), [0, 1])
+  assert.equal(normalized[0].status, 'completed')
+  assert.equal(normalized[1].current_tool, 'terminal')
+  for (const row of normalized) {
+    assert.deepEqual(Object.keys(row).sort(), [
+      'api_calls', 'current_tool', 'direct_chat_available', 'duration_seconds',
+      'finished_at', 'input_tokens', 'model', 'output_tokens', 'started_at',
+      'status', 'subagent_id', 'task_index', 'total_tokens', 'updated_at', 'usage_state'
+    ])
+    for (const privateField of ['prompt', 'goal', 'summary', 'reasoning', 'tool_args', 'tool_result', 'path', 'credentials', 'tokens']) {
+      assert.equal(privateField in row, false)
+    }
+    assert.equal(row.direct_chat_available, false)
+  }
+  const snapshot = state.updateProfileSubagents({}, 'jarvis', { id: 'job-a', subagents: rows })
+  assert.equal(snapshot.jarvis.job_id, 'job-a')
+  assert.deepEqual(snapshot.jarvis.subagents, normalized)
+})
+
+test('subagent UI has an accessible compact disclosure and does not render private child fields', () => {
+  assert.match(pluginSource, /data-agent-dock-subagents/)
+  assert.match(pluginSource, /aria-expanded/)
+  assert.match(pluginSource, /['"]aria-label['"]:\s*`\$\{visibleSubagents\.length\} subagent/)
+  assert.match(pluginSource, /Subagents spawned by/)
+  assert.match(pluginSource, /width: '380px'/)
+  assert.doesNotMatch(pluginSource, /child\.summary/)
+  assert.match(pluginSource, /Tokens unavailable/)
+  assert.match(pluginSource, /Direct chat unavailable/)
+  assert.doesNotMatch(pluginSource, /child\.prompt|child\.goal|child\.summary|child\.reasoning/)
+})
+
 test('live attachment requires exact runtime-profile identity and excludes private previews', () => {
   const rows = [{
     id: 'runtime-1',
@@ -79,12 +167,49 @@ test('live attachment requires exact runtime-profile identity and excludes priva
     started_at: 10,
     last_active: 20
   }]
-  assert.deepEqual(state.liveSessionsForProfile(rows, 'jarvis', 'default'), [])
-  const projected = state.liveSessionsForProfile(rows, 'default', 'default')
+  const profiles = [{ name: 'default' }, { name: 'jarvis' }]
+  assert.deepEqual(state.liveSessionsForProfile(rows, 'jarvis', 'default', profiles), [])
+  assert.deepEqual(state.liveSessionsForProfile(rows, 'default', null, profiles), [])
+  assert.deepEqual(state.liveSessionsForProfile(rows, 'fabricated', 'fabricated', profiles), [])
+  const projected = state.liveSessionsForProfile(rows, 'default', 'default', profiles)
   assert.equal(projected.length, 1)
   assert.equal(projected[0].id, 'runtime-1')
   assert.equal(projected[0].session_key, '20260809_010203_live')
   assert.equal('preview' in projected[0], false)
+})
+
+test('runtime rebind requires exact profile and stable session identity', () => {
+  const profiles = [{ name: 'jarvis' }, { name: 'default' }]
+  const attached = {
+    run_id: 'run-1',
+    profile: 'jarvis',
+    session_id: 'stable-session-1',
+    runtime_profile: 'jarvis',
+    runtime_session_id: 'runtime-old'
+  }
+  const exact = { id: 'runtime-new', session_key: 'stable-session-1', title: 'New runtime' }
+  const wrongSession = { id: 'runtime-wrong', session_key: 'other-session', title: 'Same display title' }
+
+  assert.equal(state.normalizeRuntimeProfile(undefined), null)
+  assert.equal(state.exactRuntimeProfile('jarvis', null, profiles), null)
+  assert.equal(state.rebindCandidateForRun([wrongSession], attached, 'jarvis', 'jarvis', profiles), null)
+  assert.equal(state.rebindCandidateForRun([exact], attached, 'jarvis', 'default', profiles), null)
+  assert.equal(state.rebindCandidateForRun([exact], attached, 'jarvis', 'jarvis', profiles), exact)
+  assert.deepEqual(state.buildRebindPayload(attached, 'jarvis', 'jarvis', exact, profiles), {
+    profile: 'jarvis',
+    session_id: 'stable-session-1',
+    old_runtime_profile: 'jarvis',
+    old_runtime_session_id: 'runtime-old',
+    runtime_profile: 'jarvis',
+    runtime_session_id: 'runtime-new',
+    permission_scope: 'inherit-only'
+  })
+  assert.equal(state.buildRebindPayload(attached, 'jarvis', 'jarvis', wrongSession, profiles), null)
+  assert.match(pluginSource, /aria-label': 'Reattach live'/)
+  assert.match(pluginSource, /setBoundRuntimeSessionIds\(current => \(\{ \.\.\.current, \[attachedRun\.run_id\]: reboundRuntimeSessionId \}\)\)/)
+  assert.match(pluginSource, /const attachedRuntimeSessionId = boundRuntimeSessionIds\[attachedRunId\] \|\| attachedRun\?\.runtime_session_id \|\| ''/)
+  assert.match(pluginSource, /session_id: attachedControlRun\.runtime_session_id/)
+  assert.doesNotMatch(pluginSource, /useValue\(host\.state\.profile\) \|\| 'default'/)
 })
 
 test('ASK, NUDGE, and REDIRECT map to distinct native methods and truthful receipts', () => {
@@ -188,6 +313,49 @@ test('chat messages persist exact timestamps and format local date, time, second
   assert.equal(state.formatMessageTimestamp(null, 'en-US', 'UTC'), 'Date unavailable')
 })
 
+test('message cards use a compact footer, expose assistant Copy, and show sent images as safe attachment chips', () => {
+  assert.match(pluginSource, /rounded-xl px-3 py-1\.5 text-\[0\.75rem\]/)
+  assert.match(pluginSource, /data-agent-dock-message-footer': 'true'/)
+  assert.match(pluginSource, /mt-0\.5 flex h-4 items-center gap-1/)
+  assert.match(pluginSource, /shrink-0 tabular-nums tracking-\[0\.04em\]/)
+  assert.match(pluginSource, /'aria-label': 'Copy assistant message'/)
+  assert.match(pluginSource, /'data-agent-dock-copy': 'true'/)
+  assert.match(pluginSource, /assistant\s*\n\s*\? jsx\('button'/)
+  assert.match(pluginSource, /Assistant message copied\./)
+  assert.match(pluginSource, /Could not copy assistant message\./)
+  assert.match(pluginSource, /Copy is unavailable in this Hermes surface\./)
+  assert.match(pluginSource, /data-agent-dock-attachment-row': 'true'/)
+  assert.match(pluginSource, /className: 'contents',\s*\n\s*role: 'list'/)
+  assert.match(pluginSource, /name: 'file-media'/)
+  assert.match(pluginSource, /attachmentDisplayName\(item\.name\)/)
+  assert.match(pluginSource, /children: `\$\{attachmentCount\} image\$\{attachmentCount === 1 \? '' : 's'\}`/)
+  assert.doesNotMatch(pluginSource, /children: `Images ·/)
+  assert.doesNotMatch(pluginSource, /children:\s*['"]Retry['"]/i)
+
+  const optimisticSegment = pluginSource.match(/const optimistic = \{[^]*?append\(profile, optimistic\)/)?.[0]
+  assert.ok(optimisticSegment, 'optimistic history append must remain present')
+  assert.match(optimisticSegment, /attachments: messageAttachmentMetadata\(images\)/)
+  assert.doesNotMatch(optimisticSegment, /data_url/)
+
+  assert.match(pluginSource, /message\.assignment \? 'You · Task assignment' : 'You'/)
+  assert.match(pluginSource, /message\.intervention \? message\.intervention\.toUpperCase\(\) : 'CONTROL'/)
+  assert.match(pluginSource, /children: timestamp/)
+  assert.doesNotMatch(pluginSource, /text-\[0\.(?:52|54|56|58)rem\]/)
+})
+
+test('copy behavior is truthful and attachment history strips path-like names and private fields', async () => {
+  const copied = []
+  assert.equal(await state.copyTextToClipboard('answer', { writeText: async value => copied.push(value) }), 'copied')
+  assert.deepEqual(copied, ['answer'])
+  assert.equal(await state.copyTextToClipboard('answer', null), 'unavailable')
+  assert.equal(await state.copyTextToClipboard('answer', { writeText: async () => { throw new Error('denied') } }), 'failed')
+
+  assert.deepEqual(state.messageAttachmentMetadata([{
+    name: 'folder/private/proof.png', mime_type: 'image/png', size: 12,
+    data_url: 'data:image/png;base64,AAAA', path: 'folder/private/proof.png', private: 'omit'
+  }]), [{ name: 'proof.png', mime_type: 'image/png', size: 12 }])
+})
+
 test('idempotent submit retries once and non-idempotent submit never retries', async () => {
   let attempts = 0
   const recovered = await state.submitWithIdempotentRetry(async () => {
@@ -243,6 +411,9 @@ test('lost POST responses retain the reservation and reconcile the stable reques
 test('agent labels are proper case while payload identity stays raw', () => {
   assert.equal(state.profileDisplayLabel('atlas'), 'Atlas')
   assert.equal(state.profileDisplayLabel('proof-engineer'), 'Proof Engineer')
+  assert.equal(state.profileAvatarInitials('atlas'), 'A')
+  assert.equal(state.profileAvatarInitials('proof-engineer'), 'PE')
+  assert.equal(state.profileAvatarInitials(''), 'AI')
   const payload = state.buildJobPayload({
     profile: 'atlas', provider: 'openai-codex', model: 'gpt-5.6-terra',
     thinking: true, effort: 'xhigh', fast: true, message: 'hello',
@@ -467,12 +638,15 @@ test('Agent selector exposes truthful Working, Cancelling, and Idle states', () 
   assert.equal(state.profileActivityLabel({ status: 'cancelling' }), 'Cancelling')
   assert.equal(state.profileActivityLabel({ status: 'success' }), 'Idle')
   assert.match(pluginSource, /Select agent\. \$\{profileDisplayLabel\(currentName\)\} is \$\{selectedActivityLabel\.toLowerCase\(\)\}/)
-  assert.match(pluginSource, /activeJob\s+\? jsx\(SolvingWorkingOrb, \{ label: `\$\{profileDisplayLabel\(currentName\)\} working` \}\)/)
-  assert.match(pluginSource, /className: 'inline-block size-1\.5 shrink-0 rounded-full bg-\(--ui-text-quaternary\)'/)
+  assert.match(pluginSource, /function ProfileAvatar\(\{ profile, active = false, size = 'md', label \}\)/)
+  assert.match(pluginSource, /profileAvatarInitials\(profile\)/)
+  assert.match(pluginSource, /label: `\$\{profileDisplayLabel\(currentName\)\} avatar, \$\{selectedActivityLabel\.toLowerCase\(\)\}`/)
+  assert.match(pluginSource, /label: `\$\{profileDisplayLabel\(profile\.name\)\} avatar, \$\{profileStatus\.toLowerCase\(\)\}`/)
 })
 
 test('chat activity uses the compact square orb without a duplicate status sentence', () => {
-  assert.match(pluginSource, /className: 'grid size-8 shrink-0 place-items-center rounded border border-\(--ui-stroke-secondary\) bg-\(--ui-bg-secondary\)'/)
+  assert.match(pluginSource, /profile: activeJob\.profile/)
+  assert.match(pluginSource, /assistant \? jsx\(ProfileAvatar, \{ profile: message\.profile, size: 'sm' \}\) : null/)
   assert.match(pluginSource, /role: 'status'/)
   assert.match(pluginSource, /title: `\$\{profileDisplayLabel\(activeJob\.profile\)\} · \$\{profileActivityLabel\(activeJob\)\}`/)
   assert.doesNotMatch(pluginSource, /is working in a direct session/)
@@ -523,7 +697,7 @@ test('plugin registers floating and docked PANES_AREA modes plus pet, status-bar
   assert.match(pluginSource, /storage\.get\('selected-models', \{\}\)/)
   assert.match(pluginSource, /modelOptions\.length > 0/)
   assert.match(pluginSource, /Workload tier: \$\{selectedModelPresentation\.tierLabel\} · Reasoning effort: \$\{reasoningEffortLabel\}/)
-  assert.equal((pluginSource.match(/jsx\(SolvingWorkingOrb/g) || []).length, 3)
+  assert.equal((pluginSource.match(/jsx\(SolvingWorkingOrb/g) || []).length, 1)
   assert.doesNotMatch(pluginSource, /\bWorkingOrb\b/)
   assert.match(pluginSource, /profileActivityLabel\(activeJob\)/)
   assert.doesNotMatch(pluginSource, /activeStatusLabel/)

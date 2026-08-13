@@ -1,5 +1,5 @@
 name: hermes-agent-dock
-version: 0.3.0
+version: 0.4.0
 description: Local backend for the native Hermes Desktop specialist chat dock, profile-keyed jobs, and opt-in Kanban assignments.
 author: BkashJEE
 license: MIT

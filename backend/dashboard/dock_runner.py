@@ -13,6 +13,8 @@ import io
 import json
 import os
 import sys
+import threading
+import time
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -30,6 +32,101 @@ VALID_REASONING_EFFORTS = (
     "max",
     "ultra",
 )
+
+
+def _subagent_progress_callback(request: Mapping[str, Any]):
+    """Return a privacy-reduced JSONL callback for delegation events."""
+    progress_path = request.get("subagent_progress_path")
+    job_id = request.get("job_id")
+    if not isinstance(progress_path, str) or not progress_path or not isinstance(job_id, str):
+        return None
+
+    try:
+        from .subagent_progress import SAFE_CURRENT_TOOLS, SUBAGENT_EVENTS, subagent_id_for
+    except ImportError:
+        # ``dock_runner.py`` is also executed as a standalone script by the
+        # profile-scoped subprocess, and tests load it through a file spec;
+        # neither path has a package context or guarantees this directory is
+        # already present on sys.path.
+        dashboard_root = str(Path(__file__).resolve().parent)
+        if dashboard_root not in sys.path:
+            sys.path.insert(0, dashboard_root)
+        from subagent_progress import SAFE_CURRENT_TOOLS, SUBAGENT_EVENTS, subagent_id_for
+
+    path = Path(progress_path).resolve()
+    home = Path(os.environ.get("HERMES_HOME") or Path.home() / ".hermes").resolve()
+    allowed_root = home / "cache" / "agent-dock-progress"
+    try:
+        path.relative_to(allowed_root)
+    except ValueError as exc:
+        raise ValueError("Subagent progress path escaped the profile boundary") from exc
+
+    lock = threading.Lock()
+    started_at: dict[int, float] = {}
+
+    def callback(event_type: str, tool_name: str | None = None, _preview=None, _args=None, **kwargs):
+        event = str(event_type or "").strip().lower()
+        if event not in SUBAGENT_EVENTS:
+            return
+        task_index = kwargs.get("task_index")
+        if isinstance(task_index, bool) or not isinstance(task_index, int) or task_index < 0:
+            return
+        now = time.time()
+        if event == "subagent.start":
+            started_at.setdefault(task_index, now)
+        elif task_index not in started_at:
+            return
+        raw_status = str(kwargs.get("status") or "").strip().lower()
+        status = "running"
+        if event == "subagent.complete":
+            if raw_status in {"failed", "error", "timeout"}:
+                status = "failed"
+            elif raw_status in {"interrupted", "cancelled"}:
+                status = "interrupted"
+            else:
+                status = "completed"
+        record = {
+            "event": event,
+            "subagent_id": subagent_id_for(job_id, task_index),
+            "task_index": task_index,
+            "status": status,
+            "started_at": started_at[task_index],
+            "updated_at": now,
+            "finished_at": now if status != "running" else None,
+            "current_tool": tool_name if event == "subagent.tool" and tool_name in SAFE_CURRENT_TOOLS else None,
+            "duration_seconds": max(0, now - started_at[task_index]),
+            "model": None,
+            "api_calls": None,
+            "input_tokens": None,
+            "output_tokens": None,
+            "total_tokens": None,
+            "usage_state": "unavailable",
+            "direct_chat_available": False,
+        }
+        if event == "subagent.complete":
+            model = kwargs.get("model")
+            input_tokens = kwargs.get("input_tokens")
+            output_tokens = kwargs.get("output_tokens")
+            api_calls = kwargs.get("api_calls")
+            if isinstance(model, str) and model.strip():
+                record["model"] = model.strip()
+            if all(
+                isinstance(value, int) and not isinstance(value, bool) and value >= 0
+                for value in (input_tokens, output_tokens)
+            ):
+                record["input_tokens"] = input_tokens
+                record["output_tokens"] = output_tokens
+                record["total_tokens"] = input_tokens + output_tokens
+                record["usage_state"] = "reported"
+            if isinstance(api_calls, int) and not isinstance(api_calls, bool) and api_calls >= 0:
+                record["api_calls"] = api_calls
+        line = json.dumps(record, separators=(",", ":"), ensure_ascii=True) + "\n"
+        with lock:
+            with path.open("a", encoding="utf-8", newline="\n") as handle:
+                handle.write(line)
+                handle.flush()
+
+    return callback
 
 
 def _diagnostic_tail(*streams: str, limit: int = 360) -> str:
@@ -183,6 +280,11 @@ def _quiet_chat(request: Mapping[str, Any]) -> tuple[str, str]:
     # disabling tool progress.  The agent created by _init_agent inherits the
     # quiet flags from this value and verbose=False.
     cli.tool_progress_mode = "off"
+    progress_callback = _subagent_progress_callback(request)
+    if progress_callback is not None:
+        # HermesCLI._init_agent snapshots this method into AIAgent. Child
+        # delegation callbacks then relay authoritative subagent.* events here.
+        cli._on_tool_progress = progress_callback
     cli.reasoning_config = parse_reasoning_effort(effort)
     cli.service_tier = bool(fast)
 

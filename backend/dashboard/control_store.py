@@ -128,6 +128,12 @@ def _decode_detail(value: str | None) -> dict[str, Any]:
     return decoded if isinstance(decoded, dict) else {"value": decoded}
 
 
+def _runtime_identity(runtime_profile: Any, runtime_session_id: Any) -> tuple[str, str]:
+    profile = (_clean_identifier(runtime_profile, "runtime_profile", required=True) or "").lower()
+    session_id = _clean_identifier(runtime_session_id, "runtime_session_id", required=True) or ""
+    return profile, session_id
+
+
 class ControlStore:
     def __init__(
         self,
@@ -296,6 +302,30 @@ class ControlStore:
     def _message_row(row: sqlite3.Row | None) -> dict[str, Any] | None:
         return dict(row) if row else None
 
+    @staticmethod
+    def _assert_runtime_binding(
+        db: sqlite3.Connection,
+        run_id: str,
+        *,
+        runtime_profile: str,
+        runtime_session_id: str,
+    ) -> tuple[str, str]:
+        normalized_profile, normalized_session_id = _runtime_identity(
+            runtime_profile, runtime_session_id
+        )
+        row = db.execute(
+            "SELECT runtime_profile,runtime_session_id FROM runs WHERE run_id=?",
+            (run_id,),
+        ).fetchone()
+        if not row:
+            raise BindingError("run not found")
+        if (
+            row["runtime_profile"] != normalized_profile
+            or row["runtime_session_id"] != normalized_session_id
+        ):
+            raise BindingError("runtime identity binding mismatch")
+        return normalized_profile, normalized_session_id
+
     def attach_run(
         self,
         *,
@@ -373,6 +403,80 @@ class ControlStore:
                 now=timestamp,
             )
             return dict(db.execute("SELECT * FROM runs WHERE run_id=?", (identity,)).fetchone())
+
+    def rebind_run_runtime(
+        self,
+        *,
+        run_id: str,
+        profile: str,
+        session_id: str,
+        old_runtime_profile: str,
+        old_runtime_session_id: str,
+        runtime_profile: str,
+        runtime_session_id: str,
+        permission_scope: str = "inherit-only",
+        now: float | int | None = None,
+    ) -> dict[str, Any]:
+        """Compare-and-swap a durable run onto one exact live runtime identity."""
+        run_identity = _clean_identifier(run_id, "run_id", required=True) or ""
+        normalized_profile = (_clean_identifier(profile, "profile", required=True) or "").lower()
+        stable_session = _clean_identifier(session_id, "session_id", required=True) or ""
+        old_profile, old_session = _runtime_identity(old_runtime_profile, old_runtime_session_id)
+        new_profile, new_session = _runtime_identity(runtime_profile, runtime_session_id)
+        if permission_scope != "inherit-only":
+            raise ValidationError("Agent Dock cannot expand run permissions")
+        if old_profile != normalized_profile or new_profile != normalized_profile:
+            raise BindingError("runtime profile binding mismatch")
+        if (old_profile, old_session) == (new_profile, new_session):
+            raise ConflictError("new runtime identity is unchanged")
+
+        timestamp = _now(now)
+        with self._write() as db:
+            row = db.execute("SELECT * FROM runs WHERE run_id=?", (run_identity,)).fetchone()
+            if not row:
+                raise BindingError("run not found")
+            if row["profile"] != normalized_profile or row["session_id"] != stable_session:
+                raise BindingError("run profile or session binding mismatch")
+            if (
+                row["runtime_profile"] != old_profile
+                or row["runtime_session_id"] != old_session
+            ):
+                raise ConflictError("run runtime identity is stale")
+
+            updated = db.execute(
+                """UPDATE runs
+                   SET runtime_profile=?,runtime_session_id=?,updated_at=?
+                 WHERE run_id=? AND profile=? AND session_id=?
+                   AND runtime_profile=? AND runtime_session_id=?""",
+                (
+                    new_profile,
+                    new_session,
+                    timestamp,
+                    run_identity,
+                    normalized_profile,
+                    stable_session,
+                    old_profile,
+                    old_session,
+                ),
+            )
+            if updated.rowcount != 1:
+                raise ConflictError("run runtime identity is stale")
+            self._event(
+                db,
+                kind="run_rebound",
+                run_id=run_identity,
+                source="agent-dock",
+                detail={
+                    "profile": normalized_profile,
+                    "old_runtime_profile": old_profile,
+                    "old_runtime_session_id": old_session,
+                    "runtime_profile": new_profile,
+                    "runtime_session_id": new_session,
+                    "reason": "explicit_rebind",
+                },
+                now=timestamp,
+            )
+            return dict(db.execute("SELECT * FROM runs WHERE run_id=?", (run_identity,)).fetchone())
 
     def list_runs(self, *, profile: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
         bounded = max(1, min(int(limit), 200))
@@ -479,6 +583,8 @@ class ControlStore:
         self,
         message_id: str,
         *,
+        runtime_profile: str,
+        runtime_session_id: str,
         dispatch_token: str | None = None,
         dispatcher_id: str | None = None,
         now: float | int | None = None,
@@ -491,6 +597,12 @@ class ControlStore:
             row = db.execute("SELECT * FROM messages WHERE message_id=?", (message_id,)).fetchone()
             if not row:
                 raise BindingError("message not found")
+            self._assert_runtime_binding(
+                db,
+                row["run_id"],
+                runtime_profile=runtime_profile,
+                runtime_session_id=runtime_session_id,
+            )
             if row["state"] in TERMINAL_MESSAGE_STATES or row["state"] in {"accepted", "delivered"}:
                 raise LeaseError("message is no longer claimable")
             if row["state"] == "dispatching" and float(row["lease_expires_at"] or 0) > timestamp:
@@ -562,6 +674,8 @@ class ControlStore:
         self,
         *,
         message_id: str,
+        runtime_profile: str,
+        runtime_session_id: str,
         stage: str | None = None,
         state: str | None = None,
         verification_state: str | None = None,
@@ -589,6 +703,12 @@ class ControlStore:
             message = db.execute("SELECT * FROM messages WHERE message_id=?", (message_id,)).fetchone()
             if not message:
                 raise BindingError("message not found")
+            self._assert_runtime_binding(
+                db,
+                message["run_id"],
+                runtime_profile=runtime_profile,
+                runtime_session_id=runtime_session_id,
+            )
             existing_receipt = db.execute(
                 "SELECT * FROM receipts WHERE receipt_id=?", (identity,)
             ).fetchone()

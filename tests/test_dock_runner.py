@@ -200,6 +200,136 @@ class DockRunnerTests(unittest.TestCase):
         self.assertEqual(detail, "Hermes runner failed; diagnostics unavailable")
         self.assertNotIn("secret-token-value", detail)
 
+    def test_subagent_callback_requires_start_and_writes_only_public_lifecycle_fields(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            progress_path = home / "cache" / "agent-dock-progress" / "job-123.jsonl"
+            progress_path.parent.mkdir(parents=True)
+            with patch.dict(os.environ, {"HERMES_HOME": str(home)}):
+                callback = runner._subagent_progress_callback(
+                    {"job_id": "job-123", "subagent_progress_path": str(progress_path)}
+                )
+                self.assertIsNotNone(callback)
+                callback(
+                    "subagent.tool",
+                    "terminal",
+                    "PRIVATE PREVIEW",
+                    {"command": "PRIVATE ARGS"},
+                    task_index=0,
+                    goal="PRIVATE GOAL",
+                    prompt="PRIVATE PROMPT",
+                    summary="PRIVATE SUMMARY",
+                    reasoning="PRIVATE REASONING",
+                    model="private-model",
+                    api_calls=7,
+                    tokens={"input": 11, "output": 13},
+                )
+                callback(
+                    "subagent.start",
+                    task_index=0,
+                    goal="PRIVATE GOAL",
+                    prompt="PRIVATE PROMPT",
+                    summary="PRIVATE SUMMARY",
+                    reasoning="PRIVATE REASONING",
+                    model="private-model",
+                    api_calls=7,
+                    tokens={"input": 11, "output": 13},
+                )
+                callback(
+                    "subagent.tool",
+                    "terminal",
+                    "PRIVATE PREVIEW",
+                    {"command": "PRIVATE ARGS"},
+                    task_index=0,
+                    goal="PRIVATE GOAL",
+                    result="PRIVATE RESULT",
+                    path="C:/private/path",
+                    credentials="PRIVATE CREDENTIAL",
+                )
+                callback(
+                    "subagent.progress",
+                    task_index=0,
+                    preview="PRIVATE PROGRESS",
+                    summary="PRIVATE SUMMARY",
+                    reasoning="PRIVATE REASONING",
+                )
+                callback(
+                    "subagent.complete",
+                    task_index=0,
+                    status="completed",
+                    summary="PRIVATE SUMMARY",
+                    model="gpt-5.6-luna",
+                    api_calls=7,
+                    input_tokens=11,
+                    output_tokens=13,
+                )
+
+            rows = [json.loads(line) for line in progress_path.read_text(encoding="utf-8").splitlines()]
+            self.assertEqual([row["event"] for row in rows], [
+                "subagent.start",
+                "subagent.tool",
+                "subagent.progress",
+                "subagent.complete",
+            ])
+            public_fields = {
+                "event",
+                "subagent_id",
+                "task_index",
+                "status",
+                "started_at",
+                "updated_at",
+                "finished_at",
+                "current_tool",
+                "duration_seconds",
+                "model",
+                "api_calls",
+                "input_tokens",
+                "output_tokens",
+                "total_tokens",
+                "usage_state",
+                "direct_chat_available",
+            }
+            for row in rows:
+                self.assertEqual(set(row), public_fields)
+                self.assertNotIn("PRIVATE", json.dumps(row))
+                self.assertFalse(row["direct_chat_available"])
+            self.assertEqual(rows[0]["subagent_id"], "job-123:subagent:0")
+            self.assertEqual(rows[1]["current_tool"], "terminal")
+            self.assertIsNone(rows[2]["current_tool"])
+            self.assertEqual(rows[-1]["model"], "gpt-5.6-luna")
+            self.assertEqual(rows[-1]["api_calls"], 7)
+            self.assertEqual(rows[-1]["input_tokens"], 11)
+            self.assertEqual(rows[-1]["output_tokens"], 13)
+            self.assertEqual(rows[-1]["total_tokens"], 24)
+            self.assertEqual(rows[-1]["usage_state"], "reported")
+
+    def test_subagent_callback_rejects_progress_path_outside_profile_cache(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            outside = home / "outside.jsonl"
+            with patch.dict(os.environ, {"HERMES_HOME": str(home)}):
+                with self.assertRaisesRegex(ValueError, "escaped"):
+                    runner._subagent_progress_callback(
+                        {"job_id": "job-123", "subagent_progress_path": str(outside)}
+                    )
+
+    def test_subagent_completion_maps_timeout_and_cancel_without_claiming_success(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            progress_path = home / "cache" / "agent-dock-progress" / "job-status.jsonl"
+            progress_path.parent.mkdir(parents=True)
+            with patch.dict(os.environ, {"HERMES_HOME": str(home)}):
+                callback = runner._subagent_progress_callback(
+                    {"job_id": "job-status", "subagent_progress_path": str(progress_path)}
+                )
+                callback("subagent.start", task_index=0)
+                callback("subagent.complete", task_index=0, status="timeout")
+                callback("subagent.start", task_index=1)
+                callback("subagent.complete", task_index=1, status="cancelled")
+            rows = [json.loads(line) for line in progress_path.read_text(encoding="utf-8").splitlines()]
+            self.assertEqual(rows[1]["status"], "failed")
+            self.assertEqual(rows[3]["status"], "interrupted")
+
 
 if __name__ == "__main__":
     unittest.main()

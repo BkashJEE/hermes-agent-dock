@@ -20,6 +20,9 @@ SPEC.loader.exec_module(store_module)
 
 
 class ControlStoreTests(unittest.TestCase):
+    RUNTIME_PROFILE = "jarvis"
+    RUNTIME_SESSION_ID = "runtime-session-1"
+
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
         self.home = Path(self.temp_dir.name)
@@ -28,6 +31,21 @@ class ControlStoreTests(unittest.TestCase):
 
     def open_store(self):
         return store_module.ControlStore(hermes_home=self.home)
+
+    def claim(self, store, message_id, **kwargs):
+        return store.claim_message(
+            message_id,
+            runtime_profile=self.RUNTIME_PROFILE,
+            runtime_session_id=self.RUNTIME_SESSION_ID,
+            **kwargs,
+        )
+
+    def receipt(self, store, **kwargs):
+        return store.record_receipt(
+            runtime_profile=self.RUNTIME_PROFILE,
+            runtime_session_id=self.RUNTIME_SESSION_ID,
+            **kwargs,
+        )
 
     def test_schema_is_profile_local_configured_and_persists_across_reopen(self):
         with patch.object(store_module, "get_hermes_home", return_value=self.home):
@@ -47,6 +65,8 @@ class ControlStoreTests(unittest.TestCase):
             run = first.attach_run(
                 profile="jarvis",
                 session_id="session-1",
+                runtime_profile=self.RUNTIME_PROFILE,
+                runtime_session_id=self.RUNTIME_SESSION_ID,
                 source="desktop-session",
                 objective="Repair the reply path",
             )
@@ -56,8 +76,8 @@ class ControlStoreTests(unittest.TestCase):
                 kind="ask",
                 body="What changed?",
             )
-            claimed = first.claim_message(message["message_id"], dispatch_token="persist-dispatch")
-            receipt = first.record_receipt(
+            claimed = self.claim(first, message["message_id"], dispatch_token="persist-dispatch")
+            receipt = self.receipt(first,
                 message_id=message["message_id"],
                 stage="accepted",
                 verification_state="reported",
@@ -78,6 +98,132 @@ class ControlStoreTests(unittest.TestCase):
         self.assertEqual(selected["messages"][0]["state"], "accepted")
         self.assertEqual(selected["receipts"][0]["receipt_id"], receipt["receipt_id"])
         self.assertEqual(selected["events"], reopened.list_events(run_id=run["run_id"]))
+
+    def test_runtime_rebind_is_exact_persistent_and_rejects_stale_runtime_authority(self):
+        store = self.open_store()
+        run = store.attach_run(
+            profile="jarvis",
+            session_id="stable-rebind-session",
+            runtime_profile="jarvis",
+            runtime_session_id="runtime-old",
+            source="desktop-session",
+            objective="private objective must not enter rebound events",
+        )
+        historical = store.enqueue_message(
+            message_id="msg-rebind-history",
+            run_id=run["run_id"],
+            kind="nudge",
+            body="private historical message body",
+        )
+        old_claim = store.claim_message(
+            historical["message_id"],
+            runtime_profile="jarvis",
+            runtime_session_id="runtime-old",
+            dispatch_token="old-history-token",
+        )
+        store.record_receipt(
+            message_id=historical["message_id"],
+            runtime_profile="jarvis",
+            runtime_session_id="runtime-old",
+            stage="accepted",
+            verification_state="observed",
+            source="hermes-gateway",
+            dispatch_token=old_claim["dispatch_token"],
+            receipt_id="receipt-rebind-history",
+        )
+        pending = store.enqueue_message(
+            message_id="msg-rebind-pending",
+            run_id=run["run_id"],
+            kind="nudge",
+            body="deliver only to the rebound runtime",
+        )
+
+        invalid_rebinds = (
+            {"profile": "default"},
+            {"session_id": "wrong-stable-session"},
+            {"old_runtime_session_id": "stale-runtime"},
+            {"runtime_profile": "default"},
+        )
+        base = {
+            "run_id": run["run_id"],
+            "profile": "jarvis",
+            "session_id": "stable-rebind-session",
+            "old_runtime_profile": "jarvis",
+            "old_runtime_session_id": "runtime-old",
+            "runtime_profile": "jarvis",
+            "runtime_session_id": "runtime-new",
+            "permission_scope": "inherit-only",
+        }
+        for override in invalid_rebinds:
+            with self.subTest(override=override), self.assertRaises(
+                (store_module.BindingError, store_module.ConflictError)
+            ):
+                store.rebind_run_runtime(**(base | override))
+        with self.assertRaises(store_module.ValidationError):
+            store.rebind_run_runtime(**(base | {"permission_scope": "expanded"}))
+
+        rebound = store.rebind_run_runtime(**base)
+        self.assertEqual(rebound["runtime_session_id"], "runtime-new")
+        self.assertEqual(
+            len(store.list_events(run_id=run["run_id"], kind="run_rebound")),
+            1,
+        )
+        with self.assertRaises(store_module.ConflictError):
+            store.rebind_run_runtime(**base)
+        with self.assertRaises(store_module.BindingError):
+            store.claim_message(
+                pending["message_id"],
+                runtime_profile="jarvis",
+                runtime_session_id="runtime-old",
+            )
+
+        new_claim = store.claim_message(
+            pending["message_id"],
+            runtime_profile="jarvis",
+            runtime_session_id="runtime-new",
+            dispatch_token="new-runtime-token",
+        )
+        with self.assertRaises(store_module.BindingError):
+            store.record_receipt(
+                message_id=pending["message_id"],
+                runtime_profile="jarvis",
+                runtime_session_id="runtime-old",
+                stage="accepted",
+                verification_state="observed",
+                source="hermes-gateway",
+                dispatch_token=new_claim["dispatch_token"],
+                receipt_id="receipt-stale-runtime",
+            )
+        store.record_receipt(
+            message_id=pending["message_id"],
+            runtime_profile="jarvis",
+            runtime_session_id="runtime-new",
+            stage="accepted",
+            verification_state="observed",
+            source="hermes-gateway",
+            dispatch_token=new_claim["dispatch_token"],
+            receipt_id="receipt-new-runtime",
+        )
+        store.close()
+
+        reopened = self.open_store()
+        self.addCleanup(reopened.close)
+        selected = reopened.get_run(run["run_id"])
+        self.assertEqual(selected["runtime_session_id"], "runtime-new")
+        self.assertEqual(
+            {row["message_id"] for row in selected["messages"]},
+            {"msg-rebind-history", "msg-rebind-pending"},
+        )
+        self.assertEqual(
+            {row["receipt_id"] for row in selected["receipts"]},
+            {"receipt-rebind-history", "receipt-new-runtime"},
+        )
+        rebound_events = reopened.list_events(run_id=run["run_id"], kind="run_rebound")
+        self.assertEqual(len(rebound_events), 1)
+        serialized = json.dumps(rebound_events, sort_keys=True)
+        self.assertNotIn("private objective", serialized)
+        self.assertNotIn("private historical message body", serialized)
+        self.assertNotIn("deliver only to the rebound runtime", serialized)
 
     def test_empty_or_legacy_startup_is_additive_and_sets_schema_version(self):
         path = self.home / "agent-dock" / "control-plane.sqlite3"
@@ -235,7 +381,13 @@ class ControlStoreTests(unittest.TestCase):
     def test_state_transitions_require_valid_receipts_and_terminal_state_is_immutable(self):
         store = self.open_store()
         self.addCleanup(store.close)
-        run = store.attach_run(profile="jarvis", session_id="s-3", source="desktop-session")
+        run = store.attach_run(
+            profile="jarvis",
+            session_id="s-3",
+            runtime_profile=self.RUNTIME_PROFILE,
+            runtime_session_id=self.RUNTIME_SESSION_ID,
+            source="desktop-session",
+        )
         message = store.enqueue_message(
             message_id="msg-transition-001",
             run_id=run["run_id"],
@@ -245,9 +397,9 @@ class ControlStoreTests(unittest.TestCase):
         with self.assertRaises(store_module.TransitionError):
             store.transition_message(message["message_id"], "applied")
 
-        claimed = store.claim_message(message["message_id"], now=10, lease_seconds=30)
+        claimed = self.claim(store, message["message_id"], now=10, lease_seconds=30)
         self.assertEqual(claimed["state"], "dispatching")
-        store.record_receipt(
+        self.receipt(store,
             message_id=message["message_id"],
             stage="accepted",
             verification_state="reported",
@@ -257,7 +409,7 @@ class ControlStoreTests(unittest.TestCase):
             detail={"status": "accepted"},
             now=11,
         )
-        store.record_receipt(
+        self.receipt(store,
             message_id=message["message_id"],
             stage="delivered",
             verification_state="observed",
@@ -266,7 +418,7 @@ class ControlStoreTests(unittest.TestCase):
             detail={"checkpoint": "tool-result"},
             now=12,
         )
-        applied = store.record_receipt(
+        applied = self.receipt(store,
             message_id=message["message_id"],
             stage="applied",
             verification_state="observed",
@@ -277,7 +429,7 @@ class ControlStoreTests(unittest.TestCase):
         )
         self.assertEqual(applied["message_state"], "applied")
         with self.assertRaises(store_module.TransitionError):
-            store.record_receipt(
+            self.receipt(store,
                 message_id=message["message_id"],
                 stage="rejected",
                 verification_state="failed",
@@ -290,7 +442,13 @@ class ControlStoreTests(unittest.TestCase):
     def test_acceptance_requires_current_lease_and_receipts_are_idempotent(self):
         store = self.open_store()
         self.addCleanup(store.close)
-        run = store.attach_run(profile="jarvis", session_id="s-lease-receipt", source="desktop-session")
+        run = store.attach_run(
+            profile="jarvis",
+            session_id="s-lease-receipt",
+            runtime_profile=self.RUNTIME_PROFILE,
+            runtime_session_id=self.RUNTIME_SESSION_ID,
+            source="desktop-session",
+        )
         message = store.enqueue_message(
             message_id="msg-lease-receipt-001",
             run_id=run["run_id"],
@@ -298,7 +456,7 @@ class ControlStoreTests(unittest.TestCase):
             body="checkpoint",
         )
         with self.assertRaises(store_module.ValidationError):
-            store.record_receipt(
+            self.receipt(store,
                 message_id=message["message_id"],
                 stage="unknown",
                 verification_state="unverified",
@@ -306,18 +464,18 @@ class ControlStoreTests(unittest.TestCase):
                 receipt_id="   ",
             )
         with self.assertRaises(store_module.LeaseError):
-            store.record_receipt(
+            self.receipt(store,
                 message_id=message["message_id"],
                 stage="accepted",
                 verification_state="observed",
                 source="hermes-gateway",
                 receipt_id="receipt-no-claim",
             )
-        claimed = store.claim_message(
-            message["message_id"], dispatch_token="current-token", now=100, lease_seconds=30
+        claimed = self.claim(
+            store, message["message_id"], dispatch_token="current-token", now=100, lease_seconds=30
         )
         with self.assertRaises(store_module.LeaseError):
-            store.record_receipt(
+            self.receipt(store,
                 message_id=message["message_id"],
                 stage="accepted",
                 verification_state="observed",
@@ -326,7 +484,7 @@ class ControlStoreTests(unittest.TestCase):
                 receipt_id="receipt-stale-claim",
                 now=101,
             )
-        accepted = store.record_receipt(
+        accepted = self.receipt(store,
             message_id=message["message_id"],
             stage="accepted",
             verification_state="observed",
@@ -336,7 +494,7 @@ class ControlStoreTests(unittest.TestCase):
             detail={"status": "queued"},
             now=102,
         )
-        duplicate = store.record_receipt(
+        duplicate = self.receipt(store,
             message_id=message["message_id"],
             stage="accepted",
             verification_state="observed",
@@ -372,14 +530,21 @@ class ControlStoreTests(unittest.TestCase):
     def test_claim_lease_has_one_winner_and_expired_lease_can_be_reclaimed(self):
         store = self.open_store()
         self.addCleanup(store.close)
-        run = store.attach_run(profile="jarvis", session_id="s-4", source="desktop-session")
+        run = store.attach_run(
+            profile="jarvis",
+            session_id="s-4",
+            runtime_profile=self.RUNTIME_PROFILE,
+            runtime_session_id=self.RUNTIME_SESSION_ID,
+            source="desktop-session",
+        )
         message = store.enqueue_message(
             message_id="msg-lease-001",
             run_id=run["run_id"],
             kind="nudge",
             body="wait for checkpoint",
         )
-        first = store.claim_message(
+        first = self.claim(
+            store,
             message["message_id"],
             dispatch_token="dispatch-a",
             now=100,
@@ -387,13 +552,15 @@ class ControlStoreTests(unittest.TestCase):
         )
         self.assertEqual(first["dispatch_token"], "dispatch-a")
         with self.assertRaises(store_module.LeaseError):
-            store.claim_message(
+            self.claim(
+                store,
                 message["message_id"],
                 dispatch_token="dispatch-b",
                 now=105,
                 lease_seconds=10,
             )
-        reclaimed = store.claim_message(
+        reclaimed = self.claim(
+            store,
             message["message_id"],
             dispatch_token="dispatch-b",
             now=111,
@@ -410,7 +577,8 @@ class ControlStoreTests(unittest.TestCase):
             try:
                 barrier.wait()
                 try:
-                    other.claim_message(
+                    self.claim(
+                        other,
                         message["message_id"],
                         dispatch_token=token,
                         now=200,
@@ -439,6 +607,8 @@ class ControlStoreTests(unittest.TestCase):
         run = store.attach_run(
             profile="jarvis",
             session_id="s-5",
+            runtime_profile=self.RUNTIME_PROFILE,
+            runtime_session_id=self.RUNTIME_SESSION_ID,
             source="desktop-session",
             objective="token=super-secret " + ("objective " * 100),
         )
@@ -449,8 +619,9 @@ class ControlStoreTests(unittest.TestCase):
             body="private transcript body",
         )
         secret = "api_key=super-secret-value password=hunter2 C:\\Users\\Alice\\private\\file.txt"
-        claimed = store.claim_message(message["message_id"], dispatch_token="redaction-dispatch")
-        store.record_receipt(
+        claimed = self.claim(store, message["message_id"], dispatch_token="redaction-dispatch")
+        self.receipt(
+            store,
             message_id=message["message_id"],
             stage="accepted",
             verification_state="reported",
