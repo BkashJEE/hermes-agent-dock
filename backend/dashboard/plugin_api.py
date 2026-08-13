@@ -851,6 +851,7 @@ def _public_job(job: dict[str, Any]) -> dict[str, Any]:
         "kanban_board",
         "kanban_error",
         "image_count",
+        "subagents",
     }
     return {key: value for key, value in job.items() if key in public_keys}
 

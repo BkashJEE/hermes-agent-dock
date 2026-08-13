@@ -340,7 +340,7 @@ test('message cards use a compact footer, expose assistant Copy, and show sent i
   assert.match(pluginSource, /message\.assignment \? 'You · Task assignment' : 'You'/)
   assert.match(pluginSource, /message\.intervention \? message\.intervention\.toUpperCase\(\) : 'CONTROL'/)
   assert.match(pluginSource, /children: timestamp/)
-  assert.doesNotMatch(pluginSource, /text-\[0\.(?:52|54|56)rem\]/)
+  assert.doesNotMatch(pluginSource, /text-\[0\.(?:52|54|56|58)rem\]/)
 })
 
 test('copy behavior is truthful and attachment history strips path-like names and private fields', async () => {

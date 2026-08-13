@@ -2124,7 +2124,7 @@ function AgentDock({ mode = DEFAULT_DOCK_MODE, onToggleMode }) {
                         jsxs('label', {
                           className: 'min-w-0',
                           children: [
-                            jsx('span', { className: 'mb-1 block text-[0.58rem] font-medium uppercase tracking-[0.1em] text-(--ui-text-quaternary)', children: 'Agent' }),
+                            jsx('span', { className: 'mb-1 block text-[0.6rem] font-medium uppercase tracking-[0.1em] text-(--ui-text-tertiary)', children: 'Agent' }),
                             jsxs(Select, {
                               onValueChange: selectProfile,
                               value: currentName,
@@ -2621,7 +2621,7 @@ function AgentDock({ mode = DEFAULT_DOCK_MODE, onToggleMode }) {
                             }, kind))
                           }),
                           jsx('p', {
-                            className: 'text-[0.58rem] leading-relaxed text-(--ui-text-quaternary)',
+                            className: 'text-[0.6rem] leading-relaxed text-(--ui-text-tertiary)',
                             children: interventionKind === 'ask'
                               ? attachedLiveSession?.status === 'idle'
                                 ? 'Read-only question · run is idle'
@@ -2686,15 +2686,15 @@ function AgentDock({ mode = DEFAULT_DOCK_MODE, onToggleMode }) {
                             : null,
                           controlHistoryQuery.data?.receipts?.length
                             ? jsx('p', {
-                                className: 'text-[0.58rem] text-(--ui-text-quaternary)',
+                                className: 'text-[0.6rem] text-(--ui-text-tertiary)',
                                 children: `Latest receipt · ${receiptLabel(controlHistoryQuery.data.receipts.at(-1)?.state || controlHistoryQuery.data.receipts.at(-1)?.stage)} · source ${controlHistoryQuery.data.receipts.at(-1)?.source || 'unverified'}`
                               })
                             : jsx('p', {
-                                className: 'text-[0.58rem] text-(--ui-text-quaternary)',
+                                className: 'text-[0.6rem] text-(--ui-text-tertiary)',
                                 children: 'Proof · no application receipt observed yet'
                               }),
                           jsx('p', {
-                            className: 'text-[0.58rem] text-(--ui-text-quaternary)',
+                            className: 'text-[0.6rem] text-(--ui-text-tertiary)',
                             children: `Verification · ${verificationQuery.data?.verification?.status || (verificationQuery.isError ? 'unavailable' : 'unknown')}`
                           })
                         ]
@@ -2752,7 +2752,7 @@ function AgentDock({ mode = DEFAULT_DOCK_MODE, onToggleMode }) {
                         children: assignTask ? 'Task ✓' : 'Assign task'
                       }),
                       jsx('span', {
-                        className: 'ml-auto text-[0.58rem] text-(--ui-text-quaternary)',
+                        className: 'ml-auto text-[0.6rem] text-(--ui-text-tertiary)',
                         children: 'Enter send · Shift+Enter newline'
                       }),
                       jsx(Button, {

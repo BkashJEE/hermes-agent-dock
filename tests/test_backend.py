@@ -883,6 +883,10 @@ class BackendSecurityTests(unittest.TestCase):
         self.assertIsNone(child["total_tokens"])
         self.assertEqual(child["usage_state"], "unavailable")
         self.assertFalse(child["direct_chat_available"])
+        public = api._public_job(job)
+        self.assertEqual(public["subagents"], [child])
+        self.assertNotIn("_subagent_progress_path", public)
+        self.assertNotIn("_subagent_started_ids", public)
 
     def test_subagent_progress_file_is_removed_with_evicted_job(self):
         with tempfile.TemporaryDirectory() as directory:
