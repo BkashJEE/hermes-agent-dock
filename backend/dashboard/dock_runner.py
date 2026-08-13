@@ -79,7 +79,12 @@ def _subagent_progress_callback(request: Mapping[str, Any]):
         raw_status = str(kwargs.get("status") or "").strip().lower()
         status = "running"
         if event == "subagent.complete":
-            status = raw_status if raw_status in {"completed", "failed", "interrupted"} else "completed"
+            if raw_status in {"failed", "error", "timeout"}:
+                status = "failed"
+            elif raw_status in {"interrupted", "cancelled"}:
+                status = "interrupted"
+            else:
+                status = "completed"
         record = {
             "event": event,
             "subagent_id": subagent_id_for(job_id, task_index),

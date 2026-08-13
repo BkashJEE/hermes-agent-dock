@@ -313,6 +313,23 @@ class DockRunnerTests(unittest.TestCase):
                         {"job_id": "job-123", "subagent_progress_path": str(outside)}
                     )
 
+    def test_subagent_completion_maps_timeout_and_cancel_without_claiming_success(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            progress_path = home / "cache" / "agent-dock-progress" / "job-status.jsonl"
+            progress_path.parent.mkdir(parents=True)
+            with patch.dict(os.environ, {"HERMES_HOME": str(home)}):
+                callback = runner._subagent_progress_callback(
+                    {"job_id": "job-status", "subagent_progress_path": str(progress_path)}
+                )
+                callback("subagent.start", task_index=0)
+                callback("subagent.complete", task_index=0, status="timeout")
+                callback("subagent.start", task_index=1)
+                callback("subagent.complete", task_index=1, status="cancelled")
+            rows = [json.loads(line) for line in progress_path.read_text(encoding="utf-8").splitlines()]
+            self.assertEqual(rows[1]["status"], "failed")
+            self.assertEqual(rows[3]["status"], "interrupted")
+
 
 if __name__ == "__main__":
     unittest.main()
