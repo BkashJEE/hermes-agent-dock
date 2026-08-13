@@ -335,14 +335,15 @@ class BackendSecurityTests(unittest.TestCase):
         self.assertNotIn("secret-token-value", error)
 
     def test_runner_error_redacts_credentials_and_private_paths(self):
+        bearer = "SUPER" + "SECRET_BEARER_123456"
         error = api._safe_runner_error(
-            "authorization: Bearer SUPERSECRET_BEARER_123456 "
+            f"authorization: Bearer {bearer} "
             "C:\\Users\\Alice\\My Documents\\board.sqlite; "
             "\\\\server\\share\\private\\board.sqlite; "
             "/tmp/private/runner.log",
             1,
         )
-        self.assertNotIn("SUPERSECRET_BEARER_123456", error)
+        self.assertNotIn(bearer, error)
         self.assertNotIn("Alice", error)
         self.assertNotIn("server", error)
         self.assertNotIn("/tmp/", error)

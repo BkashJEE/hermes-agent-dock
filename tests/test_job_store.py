@@ -204,22 +204,23 @@ class JobStoreTests(unittest.TestCase):
         row = self.reserve(store, request_id="req-redaction-12345678")
         token = row["attempt_token"]
         self.assertTrue(store.mark_running(row["job_id"], token))
+        bearer = "SUPER" + "SECRET_BEARER_123456"
         summary = (
-            "authorization: Bearer SUPERSECRET_BEARER_123456 "
+            f"authorization: Bearer {bearer} "
             "C:\\Users\\Alice\\My Documents\\board.sqlite; "
             "\\\\server\\share\\private\\board.sqlite; "
             "/tmp/private/board.sqlite"
         )
         self.assertTrue(store.complete_error(row["job_id"], token, summary))
         stored = store.get_job(row["job_id"])["error_summary"]
-        self.assertNotIn("SUPERSECRET_BEARER_123456", stored)
+        self.assertNotIn(bearer, stored)
         self.assertNotIn("Alice", stored)
         self.assertNotIn("server", stored)
         self.assertNotIn("/tmp/", stored)
         self.assertIn("[REDACTED]", stored)
         self.assertIn("[PRIVATE_PATH]", stored)
         raw = store.database_path.read_bytes()
-        for sentinel in (b"SUPERSECRET_BEARER_123456", b"Alice", b"server", b"/tmp/private"):
+        for sentinel in (bearer.encode(), b"Alice", b"server", b"/tmp/private"):
             self.assertNotIn(sentinel, raw)
 
     def test_publish_commits_before_callback_failure(self):
