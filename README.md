@@ -4,7 +4,7 @@ A native Hermes Desktop floating card by default for direct chat with configured
 
 > Community project. Not an official Nous Research release.
 
-**Current release:** v0.3.0 · [Security policy](SECURITY.md) · [Third-party notices](THIRD_PARTY_NOTICES.md)
+**Release candidate:** v0.4.0 (local, not yet published) · [Security policy](SECURITY.md) · [Third-party notices](THIRD_PARTY_NOTICES.md)
 
 <p align="center">
   <img src="docs/assets/agent-dock-dark-cover.png" alt="Dark conceptual workflow illustration showing a busy Hermes orchestrator and direct Agent Dock paths to researcher, builder, reviewer, and vision specialists" width="100%">

@@ -15,7 +15,7 @@ import uuid
 from pathlib import Path
 
 PLUGIN_ID = "hermes-agent-dock"
-VERSION = "0.3.0"
+VERSION = "0.4.0"
 ROOT = Path(__file__).resolve().parent
 ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 PLAIN_ROW_RE = re.compile(r"^(not enabled|enabled|disabled)\s+\S+\s+\S+\s+(\S+)\s*$", re.IGNORECASE)
@@ -121,6 +121,8 @@ def install(home: Path, copy_only: bool = False) -> dict[str, object]:
                 "backend/dashboard/plugin_api.py": sha256(backend_dir / "dashboard" / "plugin_api.py"),
                 "backend/dashboard/dock_runner.py": sha256(backend_dir / "dashboard" / "dock_runner.py"),
                 "backend/dashboard/control_store.py": sha256(backend_dir / "dashboard" / "control_store.py"),
+                "backend/dashboard/job_store.py": sha256(backend_dir / "dashboard" / "job_store.py"),
+                "backend/dashboard/subagent_progress.py": sha256(backend_dir / "dashboard" / "subagent_progress.py"),
             },
         }
         enable_result = None

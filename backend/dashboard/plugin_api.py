@@ -75,7 +75,7 @@ public_subagent_record = _SUBAGENT_MODULE.public_subagent_record
 
 router = APIRouter()
 
-PLUGIN_VERSION = "0.3.0"
+PLUGIN_VERSION = "0.4.0"
 MAX_MESSAGE_CHARS = 12_000
 MAX_RESPONSE_CHARS = 120_000
 MAX_IMAGE_ATTACHMENTS = 4
