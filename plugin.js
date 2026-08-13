@@ -129,6 +129,12 @@ function profileDisplayLabel(rawProfile) {
     .join(' ')
 }
 
+function profileAvatarInitials(rawProfile) {
+  const parts = String(rawProfile ?? '').split(/[-_]+/).filter(Boolean)
+  if (!parts.length) return 'AI'
+  return parts.slice(0, 2).map(part => part.charAt(0).toUpperCase()).join('') || 'AI'
+}
+
 function modelOptionKey(provider, model) {
   return `${encodeURIComponent(provider)}::${encodeURIComponent(model)}`
 }
@@ -1085,9 +1091,11 @@ function MessageBubble({ message }) {
       host.notify({ kind: 'error', message: 'Could not copy assistant message.' })
     }
   }
-  return jsx('div', {
-    className: cn('flex', user ? 'justify-end' : 'justify-start'),
-    children: jsxs('div', {
+  return jsxs('div', {
+    className: cn('flex items-end gap-1.5', user ? 'justify-end' : 'justify-start'),
+    children: [
+      assistant ? jsx(ProfileAvatar, { profile: message.profile, size: 'sm' }) : null,
+      jsxs('div', {
       className: cn(
         'max-w-[88%] rounded-xl px-3 py-1.5 text-[0.75rem] leading-relaxed whitespace-pre-wrap wrap-anywhere',
         user
@@ -1167,7 +1175,34 @@ function MessageBubble({ message }) {
           ]
         })
       ]
-    })
+      })
+    ]
+  })
+}
+
+function ProfileAvatar({ profile, active = false, size = 'md', label }) {
+  const display = profileDisplayLabel(profile) || 'Agent'
+  const dimensions = size === 'sm' ? 'size-5 text-[0.52rem]' : 'size-7 text-[0.62rem]'
+  return jsxs('span', {
+    'aria-label': label || `${display} avatar${active ? ', working' : ''}`,
+    className: cn(
+      'relative inline-grid shrink-0 place-items-center rounded-lg border font-semibold tracking-[-0.02em]',
+      dimensions,
+      active
+        ? 'border-(--ui-accent) bg-[color-mix(in_srgb,var(--ui-accent)_16%,var(--ui-bg-secondary))] text-(--ui-accent)'
+        : 'border-(--ui-stroke-secondary) bg-(--ui-bg-secondary) text-(--ui-text-secondary)'
+    ),
+    role: 'img',
+    title: display,
+    children: [
+      jsx('span', { 'aria-hidden': true, children: profileAvatarInitials(profile) }),
+      active
+        ? jsx('span', {
+            'aria-hidden': true,
+            className: 'absolute -bottom-0.5 -right-0.5 size-2 rounded-full border border-(--ui-surface-background) bg-(--ui-accent)'
+          })
+        : null
+    ]
   })
 }
 
@@ -2107,12 +2142,12 @@ function AgentDock({ mode = DEFAULT_DOCK_MODE, onToggleMode }) {
                                   children: jsxs('span', {
                                     className: 'flex min-w-0 flex-1 items-center gap-1.5',
                                     children: [
-                                      activeJob
-                                        ? jsx(SolvingWorkingOrb, { label: `${profileDisplayLabel(currentName)} working` })
-                                        : jsx('span', {
-                                            'aria-hidden': true,
-                                            className: 'inline-block size-1.5 shrink-0 rounded-full bg-(--ui-text-quaternary)'
-                                          }),
+                                      jsx(ProfileAvatar, {
+                                        active: Boolean(activeJob),
+                                        label: `${profileDisplayLabel(currentName)} avatar, ${selectedActivityLabel.toLowerCase()}`,
+                                        profile: currentName,
+                                        size: 'sm'
+                                      }),
                                       jsx(SelectValue, { placeholder: 'Choose agent' }),
                                       jsx('span', {
                                         className: cn(
@@ -2135,12 +2170,11 @@ function AgentDock({ mode = DEFAULT_DOCK_MODE, onToggleMode }) {
                                       children: jsxs('span', {
                                         className: 'flex w-full items-center gap-1.5',
                                         children: [
-                                          jsx('span', {
-                                            'aria-hidden': true,
-                                            className: cn(
-                                              'inline-block size-1.5 shrink-0 rounded-full',
-                                              profileWorking ? 'animate-pulse bg-(--ui-accent)' : 'bg-(--ui-text-quaternary)'
-                                            )
+                                          jsx(ProfileAvatar, {
+                                            active: profileWorking,
+                                            label: `${profileDisplayLabel(profile.name)} avatar, ${profileStatus.toLowerCase()}`,
+                                            profile: profile.name,
+                                            size: 'sm'
                                           }),
                                           jsx('span', { children: profileDisplayLabel(profile.name) }),
                                           jsx('span', {
@@ -2508,9 +2542,13 @@ function AgentDock({ mode = DEFAULT_DOCK_MODE, onToggleMode }) {
                     role: 'status',
                     children: [
                       jsx('span', {
-                        className: 'grid size-8 shrink-0 place-items-center rounded border border-(--ui-stroke-secondary) bg-(--ui-bg-secondary)',
+                        className: 'relative grid size-8 shrink-0 place-items-center',
                         title: `${profileDisplayLabel(activeJob.profile)} · ${profileActivityLabel(activeJob)}`,
-                        children: jsx(SolvingWorkingOrb, { label: `${currentProfile?.display_name || currentName} ${profileActivityLabel(activeJob)}` })
+                        children: jsx(ProfileAvatar, {
+                          active: true,
+                          label: `${currentProfile?.display_name || profileDisplayLabel(currentName)} ${profileActivityLabel(activeJob)}`,
+                          profile: activeJob.profile
+                        })
                       }),
                       activeJob.id
                         ? jsx('button', {

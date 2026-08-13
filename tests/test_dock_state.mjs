@@ -35,6 +35,7 @@ const exported = [
   'reasoningEffortForSliderPosition',
   'reasoningEffortSliderPosition',
   'profileActivityLabel',
+  'profileAvatarInitials',
   'profileDisplayLabel',
   'receiptLabel',
   'rebindCandidateForRun',
@@ -409,6 +410,9 @@ test('lost POST responses retain the reservation and reconcile the stable reques
 test('agent labels are proper case while payload identity stays raw', () => {
   assert.equal(state.profileDisplayLabel('atlas'), 'Atlas')
   assert.equal(state.profileDisplayLabel('proof-engineer'), 'Proof Engineer')
+  assert.equal(state.profileAvatarInitials('atlas'), 'A')
+  assert.equal(state.profileAvatarInitials('proof-engineer'), 'PE')
+  assert.equal(state.profileAvatarInitials(''), 'AI')
   const payload = state.buildJobPayload({
     profile: 'atlas', provider: 'openai-codex', model: 'gpt-5.6-terra',
     thinking: true, effort: 'xhigh', fast: true, message: 'hello',
@@ -633,12 +637,15 @@ test('Agent selector exposes truthful Working, Cancelling, and Idle states', () 
   assert.equal(state.profileActivityLabel({ status: 'cancelling' }), 'Cancelling')
   assert.equal(state.profileActivityLabel({ status: 'success' }), 'Idle')
   assert.match(pluginSource, /Select agent\. \$\{profileDisplayLabel\(currentName\)\} is \$\{selectedActivityLabel\.toLowerCase\(\)\}/)
-  assert.match(pluginSource, /activeJob\s+\? jsx\(SolvingWorkingOrb, \{ label: `\$\{profileDisplayLabel\(currentName\)\} working` \}\)/)
-  assert.match(pluginSource, /className: 'inline-block size-1\.5 shrink-0 rounded-full bg-\(--ui-text-quaternary\)'/)
+  assert.match(pluginSource, /function ProfileAvatar\(\{ profile, active = false, size = 'md', label \}\)/)
+  assert.match(pluginSource, /profileAvatarInitials\(profile\)/)
+  assert.match(pluginSource, /label: `\$\{profileDisplayLabel\(currentName\)\} avatar, \$\{selectedActivityLabel\.toLowerCase\(\)\}`/)
+  assert.match(pluginSource, /label: `\$\{profileDisplayLabel\(profile\.name\)\} avatar, \$\{profileStatus\.toLowerCase\(\)\}`/)
 })
 
 test('chat activity uses the compact square orb without a duplicate status sentence', () => {
-  assert.match(pluginSource, /className: 'grid size-8 shrink-0 place-items-center rounded border border-\(--ui-stroke-secondary\) bg-\(--ui-bg-secondary\)'/)
+  assert.match(pluginSource, /profile: activeJob\.profile/)
+  assert.match(pluginSource, /assistant \? jsx\(ProfileAvatar, \{ profile: message\.profile, size: 'sm' \}\) : null/)
   assert.match(pluginSource, /role: 'status'/)
   assert.match(pluginSource, /title: `\$\{profileDisplayLabel\(activeJob\.profile\)\} · \$\{profileActivityLabel\(activeJob\)\}`/)
   assert.doesNotMatch(pluginSource, /is working in a direct session/)
@@ -689,7 +696,7 @@ test('plugin registers floating and docked PANES_AREA modes plus pet, status-bar
   assert.match(pluginSource, /storage\.get\('selected-models', \{\}\)/)
   assert.match(pluginSource, /modelOptions\.length > 0/)
   assert.match(pluginSource, /Workload tier: \$\{selectedModelPresentation\.tierLabel\} · Reasoning effort: \$\{reasoningEffortLabel\}/)
-  assert.equal((pluginSource.match(/jsx\(SolvingWorkingOrb/g) || []).length, 3)
+  assert.equal((pluginSource.match(/jsx\(SolvingWorkingOrb/g) || []).length, 1)
   assert.doesNotMatch(pluginSource, /\bWorkingOrb\b/)
   assert.match(pluginSource, /profileActivityLabel\(activeJob\)/)
   assert.doesNotMatch(pluginSource, /activeStatusLabel/)
