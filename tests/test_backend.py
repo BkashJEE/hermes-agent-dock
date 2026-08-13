@@ -898,6 +898,44 @@ class BackendSecurityTests(unittest.TestCase):
             self.assertFalse(progress_path.exists())
             self.assertNotIn("job-cleanup", api._JOBS)
 
+    def test_rehydrated_interrupted_job_restores_children_without_replay(self):
+        with tempfile.TemporaryDirectory() as directory:
+            profile_home = Path(directory) / "profiles" / "jarvis"
+            progress_path = profile_home / "cache" / "agent-dock-progress" / "job-restart.jsonl"
+            progress_path.parent.mkdir(parents=True)
+            progress_path.write_text(json.dumps({
+                "event": "subagent.start",
+                "subagent_id": "job-restart:subagent:0",
+                "task_index": 0,
+                "status": "running",
+                "started_at": 10,
+                "updated_at": 10,
+                "finished_at": None,
+                "current_tool": None,
+                "duration_seconds": 0,
+                "model": None,
+                "api_calls": None,
+                "input_tokens": None,
+                "output_tokens": None,
+                "total_tokens": None,
+                "usage_state": "unavailable",
+                "direct_chat_available": False,
+            }) + "\n", encoding="utf-8")
+            row = {
+                "job_id": "job-restart",
+                "profile_id": "jarvis",
+                "status": "interrupted",
+                "attempt_token": "attempt",
+                "created_at": 10,
+                "finished_at": 20,
+            }
+            with patch.object(api, "_profile_home", return_value=profile_home):
+                job = api._memory_job_from_row(row)
+            self.assertEqual(len(job["subagents"]), 1)
+            self.assertEqual(job["subagents"][0]["status"], "interrupted")
+            self.assertEqual(job["subagents"][0]["finished_at"], 20)
+            self.assertIsNone(job["subagents"][0]["current_tool"])
+
 
 if __name__ == "__main__":
     unittest.main()

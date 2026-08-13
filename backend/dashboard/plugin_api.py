@@ -301,7 +301,7 @@ def _memory_job_from_row(row: dict[str, Any], existing: dict[str, Any] | None = 
     response = None
     if existing and existing.get("_attempt_token") == row.get("attempt_token"):
         response = existing.get("response")
-    return {
+    job = {
         "id": row["job_id"],
         "profile": row["profile_id"],
         "model": row.get("model"),
@@ -325,6 +325,32 @@ def _memory_job_from_row(row: dict[str, Any], existing: dict[str, Any] | None = 
         "image_count": int(row.get("image_count") or 0),
         "_attempt_token": row.get("attempt_token"),
     }
+    progress_path = (
+        _profile_home(row["profile_id"]).resolve()
+        / "cache"
+        / "agent-dock-progress"
+        / f"{row['job_id']}.jsonl"
+    )
+    if progress_path.is_file():
+        job.update(
+            {
+                "subagents": list(existing.get("subagents") or []) if existing else [],
+                "_subagent_progress_path": progress_path,
+                "_subagent_started_ids": set(existing.get("_subagent_started_ids") or ()) if existing else set(),
+            }
+        )
+        _refresh_subagents(job)
+        if job["status"] in {"interrupted", "cancelled"}:
+            for child in job.get("subagents") or []:
+                if child.get("status") == "running":
+                    child.update(
+                        {
+                            "status": "interrupted",
+                            "finished_at": row.get("finished_at") or child.get("updated_at"),
+                            "current_tool": None,
+                        }
+                    )
+    return job
 
 
 def _rehydrate_jobs(store: Any) -> None:
