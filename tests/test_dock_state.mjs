@@ -50,7 +50,9 @@ const exported = [
   'submitWithIdempotentRetry',
   'upsertProfileJob',
   'validateImageFileMetadata',
-  'workingProfileNames'
+  'workingProfileNames',
+  'normalizeSubagents',
+  'updateProfileSubagents'
 ].join(', ')
 const state = await import(`data:text/javascript;base64,${Buffer.from(`${helpers}\nexport { ${exported} }`).toString('base64')}`)
 
@@ -75,6 +77,84 @@ const catalog = {
     }
   ]
 }
+
+test('subagent disclosure keeps the compact public allowlist and exact job snapshot', () => {
+  const rows = [
+    {
+      subagent_id: 'job-a:subagent:1',
+      task_index: 1,
+      status: 'running',
+      current_tool: 'terminal',
+      started_at: 10,
+      updated_at: 11,
+      finished_at: null,
+      duration_seconds: 3,
+      model: 'gpt-5.6-luna',
+      api_calls: 4,
+      input_tokens: 100,
+      output_tokens: 25,
+      total_tokens: 125,
+      usage_state: 'reported',
+      direct_chat_available: true,
+      prompt: 'PRIVATE PROMPT',
+      goal: 'PRIVATE GOAL',
+      summary: 'PRIVATE SUMMARY',
+      reasoning: 'PRIVATE REASONING',
+      tool_args: { command: 'PRIVATE ARGS' },
+      tool_result: 'PRIVATE RESULT',
+      path: 'C:/private/path',
+      credentials: 'PRIVATE CREDENTIAL',
+      model: 'private-model',
+      api_calls: 7,
+      tokens: { input: 11, output: 13 }
+    },
+    {
+      subagent_id: 'job-a:subagent:0',
+      task_index: 0,
+      status: 'completed',
+      current_tool: null,
+      started_at: 1,
+      updated_at: 3,
+      finished_at: 3,
+      duration_seconds: 2,
+      model: 'private-model',
+      api_calls: 0,
+      tokens: { input: 0, output: 0 }
+    },
+    { subagent_id: 'job-a:subagent:2', task_index: 2, status: 'unknown' },
+    { subagent_id: 'job-a:subagent:bad', task_index: '2', status: 'running' }
+  ]
+  const normalized = state.normalizeSubagents(rows)
+  assert.deepEqual(normalized.map(row => row.task_index), [0, 1])
+  assert.equal(normalized[0].status, 'completed')
+  assert.equal(normalized[1].current_tool, 'terminal')
+  for (const row of normalized) {
+    assert.deepEqual(Object.keys(row).sort(), [
+      'api_calls', 'current_tool', 'direct_chat_available', 'duration_seconds',
+      'finished_at', 'input_tokens', 'model', 'output_tokens', 'started_at',
+      'status', 'subagent_id', 'task_index', 'total_tokens', 'updated_at', 'usage_state'
+    ])
+    for (const privateField of ['prompt', 'goal', 'summary', 'reasoning', 'tool_args', 'tool_result', 'path', 'credentials', 'tokens']) {
+      assert.equal(privateField in row, false)
+    }
+    assert.equal(row.direct_chat_available, false)
+  }
+  const snapshot = state.updateProfileSubagents({}, 'jarvis', { id: 'job-a', subagents: rows })
+  assert.equal(snapshot.jarvis.job_id, 'job-a')
+  assert.deepEqual(snapshot.jarvis.subagents, normalized)
+})
+
+test('subagent UI has an accessible compact disclosure and does not render private child fields', () => {
+  assert.match(pluginSource, /data-agent-dock-subagents/)
+  assert.match(pluginSource, /aria-expanded/)
+  assert.match(pluginSource, /['"]aria-label['"]:\s*`\$\{visibleSubagents\.length\} subagent/)
+  assert.match(pluginSource, /Subagents spawned by/)
+  assert.match(pluginSource, /width: '380px'/)
+  assert.doesNotMatch(pluginSource, /child\.summary/)
+  assert.match(pluginSource, /Tokens unavailable/)
+  assert.match(pluginSource, /Direct chat unavailable/)
+  assert.doesNotMatch(pluginSource, /child\.prompt|child\.goal|child\.summary|child\.reasoning/)
+})
 
 test('live attachment requires exact runtime-profile identity and excludes private previews', () => {
   const rows = [{

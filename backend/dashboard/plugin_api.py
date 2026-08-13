@@ -62,6 +62,16 @@ if _JOB_SPEC is None or _JOB_SPEC.loader is None:  # pragma: no cover - installa
 _JOB_MODULE = importlib.util.module_from_spec(_JOB_SPEC)
 _JOB_SPEC.loader.exec_module(_JOB_MODULE)
 JobStore = _JOB_MODULE.JobStore
+_SUBAGENT_SPEC = importlib.util.spec_from_file_location(
+    "hermes_agent_dock_subagent_progress",
+    Path(__file__).resolve().with_name("subagent_progress.py"),
+)
+if _SUBAGENT_SPEC is None or _SUBAGENT_SPEC.loader is None:  # pragma: no cover
+    raise RuntimeError("Agent Dock subagent progress support is unavailable")
+_SUBAGENT_MODULE = importlib.util.module_from_spec(_SUBAGENT_SPEC)
+_SUBAGENT_SPEC.loader.exec_module(_SUBAGENT_MODULE)
+merge_subagent_entries = _SUBAGENT_MODULE.merge_subagent_entries
+public_subagent_record = _SUBAGENT_MODULE.public_subagent_record
 
 router = APIRouter()
 
@@ -78,6 +88,7 @@ CATALOG_TIMEOUT_SECONDS = 60
 CATALOG_CACHE_SECONDS = 15
 JOB_RETENTION_SECONDS = 60 * 60
 MAX_RETAINED_JOBS = 200
+MAX_SUBAGENT_PROGRESS_BYTES = 2 * 1024 * 1024
 KANBAN_BOARD = "executive-organization"
 SESSION_ID_RE = re.compile(r"^\d{8}_\d{6}_[A-Za-z0-9]+$")
 SESSION_LINE_RE = re.compile(r"(?:^|\n)session_id:\s*([A-Za-z0-9_-]+)\s*$", re.MULTILINE)
@@ -818,6 +829,46 @@ def _public_job(job: dict[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in job.items() if key in public_keys}
 
 
+def _progress_root(profile: str) -> Path:
+    root = _profile_home(profile).resolve() / "cache" / "agent-dock-progress"
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def _create_progress_file(profile: str, job_id: str) -> Path:
+    path = _progress_root(profile) / f"{job_id}.jsonl"
+    with path.open("x", encoding="utf-8"):
+        pass
+    return path
+
+
+def _refresh_subagents(job: dict[str, Any]) -> None:
+    path = job.get("_subagent_progress_path")
+    if not isinstance(path, Path):
+        return
+    try:
+        if path.stat().st_size > MAX_SUBAGENT_PROGRESS_BYTES:
+            return
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return
+    incoming: list[Any] = []
+    for line in lines:
+        if not line or len(line) > 4096:
+            continue
+        try:
+            incoming.append(json.loads(line))
+        except (TypeError, ValueError):
+            continue
+    merged = merge_subagent_entries(
+        job.get("subagents") or [],
+        incoming,
+        expected_job_id=str(job.get("id") or ""),
+        started_ids=job.setdefault("_subagent_started_ids", set()),
+    )
+    job["subagents"] = [public_subagent_record(record) for record in merged]
+
+
 def _evict_completed_jobs(now: int | None = None) -> None:
     """Bound terminal-job memory while preserving a one-hour retry window."""
     current = int(time.time()) if now is None else now
@@ -835,7 +886,10 @@ def _evict_completed_jobs(now: int | None = None) -> None:
         if len(retained) > MAX_RETAINED_JOBS:
             remove.update(job_id for _, job_id in retained[: len(retained) - MAX_RETAINED_JOBS])
         for job_id in remove:
-            _JOBS.pop(job_id, None)
+            removed = _JOBS.pop(job_id, None)
+            progress_path = removed.get("_subagent_progress_path") if removed else None
+            if isinstance(progress_path, Path):
+                progress_path.unlink(missing_ok=True)
         for request_key, job_id in list(_REQUEST_JOBS.items()):
             if job_id not in _JOBS:
                 _REQUEST_JOBS.pop(request_key, None)
@@ -847,7 +901,13 @@ def _trim(value: str, limit: int = MAX_RESPONSE_CHARS) -> str:
     return value[:limit] + "\n\n[response truncated by Agent Dock]"
 
 
-def _runner_payload(request: SendRequest, image_paths: list[Path] | None = None) -> str:
+def _runner_payload(
+    request: SendRequest,
+    image_paths: list[Path] | None = None,
+    *,
+    job_id: str | None = None,
+    subagent_progress_path: Path | None = None,
+) -> str:
     payload = {
         "message": request.message,
         "model": (request.model or "").strip() or None,
@@ -856,6 +916,8 @@ def _runner_payload(request: SendRequest, image_paths: list[Path] | None = None)
         "reasoning_effort": request.reasoning_effort or "none",
         "fast": bool(request.fast),
         "images": [str(path) for path in image_paths or []],
+        "job_id": job_id,
+        "subagent_progress_path": str(subagent_progress_path) if subagent_progress_path else None,
     }
     return json.dumps(payload, ensure_ascii=False)
 
@@ -1024,7 +1086,13 @@ def _run_job(job_id: str, request: SendRequest) -> None:
 
         try:
             stdout, stderr = process.communicate(
-                input=_runner_payload(request, image_paths), timeout=JOB_TIMEOUT_SECONDS
+                input=_runner_payload(
+                    request,
+                    image_paths,
+                    job_id=job_id,
+                    subagent_progress_path=job.get("_subagent_progress_path") if job else None,
+                ),
+                timeout=JOB_TIMEOUT_SECONDS,
             )
         except subprocess.TimeoutExpired:
             _terminate_process(process)
@@ -1075,9 +1143,10 @@ def _run_job(job_id: str, request: SendRequest) -> None:
         if image_dir is not None:
             shutil.rmtree(image_dir, ignore_errors=True)
         with _JOBS_LOCK:
-            current = _JOBS.get(job_id)
-            if current:
-                current.pop("_process", None)
+            job = _JOBS.get(job_id)
+            if job:
+                _refresh_subagents(job)
+                job.pop("_process", None)
 
 
 @router.get("/health")
@@ -1446,9 +1515,27 @@ def create_job(request: SendRequest) -> dict[str, Any]:
                 detail="Kanban assignment failed; inspect local Hermes logs",
             ) from exc
     job_id = row["job_id"]
+    if created:
+        try:
+            progress_path = _create_progress_file(request.profile, job_id)
+        except OSError as exc:
+            store.complete_error(
+                row["job_id"],
+                row["attempt_token"],
+                "Subagent progress store is unavailable",
+            )
+            raise HTTPException(status_code=503, detail="Subagent progress store is unavailable") from exc
+    else:
+        progress_path = None
     with _JOBS_LOCK:
         existing = _JOBS.get(job_id)
         job = _memory_job_from_row(row, existing)
+        if created:
+            job.update({
+                "subagents": [],
+                "_subagent_progress_path": progress_path,
+                "_subagent_started_ids": set(),
+            })
         _JOBS[job_id] = job
         if request_key:
             _REQUEST_JOBS[request_key] = job_id
@@ -1473,6 +1560,8 @@ async def get_job(job_id: str) -> dict[str, Any]:
         job = _load_durable_job(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
+    with _JOBS_LOCK:
+        _refresh_subagents(job)
     return _public_job(job)
 
 

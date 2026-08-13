@@ -783,6 +783,121 @@ class BackendSecurityTests(unittest.TestCase):
             self.assertNotIn("secret-session", serialized)
             self.assertNotIn("evidence", result["items"][0])
 
+    def test_subagent_refresh_rejects_malformed_prestart_and_cross_job_jsonl(self):
+        job_id = "job-parent"
+        with tempfile.TemporaryDirectory() as directory:
+            progress_path = Path(directory) / "progress.jsonl"
+            rows = [
+                "not json",
+                {
+                    "event": "subagent.tool",
+                    "subagent_id": f"{job_id}:subagent:0",
+                    "task_index": 0,
+                    "status": "running",
+                    "started_at": 10,
+                    "updated_at": 11,
+                    "finished_at": None,
+                    "current_tool": "terminal",
+                    "duration_seconds": 1,
+                },
+                {
+                    "event": "subagent.start",
+                    "subagent_id": "other-parent:subagent:0",
+                    "task_index": 0,
+                    "status": "running",
+                    "started_at": 10,
+                    "updated_at": 10,
+                    "finished_at": None,
+                    "current_tool": None,
+                    "duration_seconds": 0,
+                },
+                {
+                    "event": "subagent.start",
+                    "subagent_id": f"{job_id}:subagent:0",
+                    "task_index": 0,
+                    "status": "running",
+                    "started_at": 10,
+                    "updated_at": 10,
+                    "finished_at": None,
+                    "current_tool": None,
+                    "duration_seconds": 0,
+                },
+                {
+                    "event": "subagent.complete",
+                    "subagent_id": f"{job_id}:subagent:0",
+                    "task_index": 0,
+                    "status": "completed",
+                    "started_at": 10,
+                    "updated_at": 12,
+                    "finished_at": 12,
+                    "current_tool": None,
+                    "duration_seconds": 2,
+                },
+                {
+                    "event": "subagent.complete",
+                    "subagent_id": f"{job_id}:subagent:0",
+                    "task_index": 0,
+                    "status": "completed",
+                    "started_at": 10,
+                    "updated_at": 12,
+                    "finished_at": 12,
+                    "current_tool": None,
+                    "duration_seconds": 2,
+                    "prompt": "PRIVATE PROMPT",
+                },
+                {
+                    "event": "subagent.progress",
+                    "subagent_id": f"{job_id}:subagent:0",
+                    "task_index": 0,
+                    "status": "running",
+                    "started_at": 10,
+                    "updated_at": 13,
+                    "finished_at": None,
+                    "current_tool": "terminal",
+                    "duration_seconds": 3,
+                },
+            ]
+            progress_path.write_text(
+                "\n".join(row if isinstance(row, str) else json.dumps(row) for row in rows) + "\n",
+                encoding="utf-8",
+            )
+            job = {
+                "id": job_id,
+                "subagents": [],
+                "_subagent_progress_path": progress_path,
+                "_subagent_started_ids": set(),
+            }
+            api._refresh_subagents(job)
+
+        self.assertEqual(len(job["subagents"]), 1)
+        child = job["subagents"][0]
+        self.assertEqual(child["subagent_id"], f"{job_id}:subagent:0")
+        self.assertEqual(child["status"], "completed")
+        self.assertIsNone(child["current_tool"])
+        self.assertNotIn("event", child)
+        self.assertNotIn("prompt", child)
+        self.assertNotIn("summary", child)
+        self.assertIsNone(child["model"])
+        self.assertIsNone(child["api_calls"])
+        self.assertIsNone(child["total_tokens"])
+        self.assertEqual(child["usage_state"], "unavailable")
+        self.assertFalse(child["direct_chat_available"])
+
+    def test_subagent_progress_file_is_removed_with_evicted_job(self):
+        with tempfile.TemporaryDirectory() as directory:
+            progress_path = Path(directory) / "job.jsonl"
+            progress_path.write_text("{}\n", encoding="utf-8")
+            now = 10_000
+            api._JOBS["job-cleanup"] = {
+                "id": "job-cleanup",
+                "status": "done",
+                "finished_at": now - api.JOB_RETENTION_SECONDS - 1,
+                "_subagent_progress_path": progress_path,
+            }
+            api._evict_completed_jobs(now=now)
+            self.assertFalse(progress_path.exists())
+            self.assertNotIn("job-cleanup", api._JOBS)
+
 
 if __name__ == "__main__":
     unittest.main()

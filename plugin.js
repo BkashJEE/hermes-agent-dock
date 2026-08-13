@@ -399,6 +399,53 @@ function profileActivityLabel(job) {
   return status === 'cancelling' ? 'Cancelling' : 'Working'
 }
 
+function normalizeSubagents(rows) {
+  if (!Array.isArray(rows)) return []
+  const allowed = new Set(['running', 'completed', 'failed', 'interrupted'])
+  return rows
+    .filter(row => (
+      row &&
+      typeof row.subagent_id === 'string' &&
+      Number.isInteger(row.task_index) &&
+      allowed.has(String(row.status || '').toLowerCase())
+    ))
+    .map(row => ({
+      subagent_id: row.subagent_id.slice(0, 128),
+      task_index: row.task_index,
+      status: String(row.status).toLowerCase(),
+      current_tool: typeof row.current_tool === 'string' ? row.current_tool.slice(0, 32) : null,
+      started_at: Number(row.started_at) || null,
+      updated_at: Number(row.updated_at) || null,
+      finished_at: Number(row.finished_at) || null,
+      duration_seconds: Number(row.duration_seconds) || 0,
+      model: typeof row.model === 'string' ? row.model.slice(0, 128) : null,
+      api_calls: Number.isInteger(row.api_calls) && row.api_calls >= 0 ? row.api_calls : null,
+      input_tokens: Number.isInteger(row.input_tokens) && row.input_tokens >= 0 ? row.input_tokens : null,
+      output_tokens: Number.isInteger(row.output_tokens) && row.output_tokens >= 0 ? row.output_tokens : null,
+      total_tokens: Number.isInteger(row.total_tokens) && row.total_tokens >= 0 ? row.total_tokens : null,
+      usage_state: row.usage_state === 'reported' ? 'reported' : 'unavailable',
+      direct_chat_available: false
+    }))
+    .sort((left, right) => left.task_index - right.task_index)
+}
+
+function subagentStatusLabel(status) {
+  return ({
+    running: 'Running',
+    completed: 'Completed',
+    failed: 'Failed',
+    interrupted: 'Interrupted'
+  })[String(status || '').toLowerCase()] || 'Unknown'
+}
+
+function updateProfileSubagents(snapshots, profile, job) {
+  if (!job?.id || !Array.isArray(job.subagents)) return snapshots
+  return {
+    ...(snapshots || {}),
+    [profile]: { job_id: job.id, subagents: normalizeSubagents(job.subagents) }
+  }
+}
+
 function pruneExpiredStartingJobs(jobs, now = Date.now()) {
   const current = jobs || {}
   const activeProfiles = new Set(activeJobActivities(current, now).map(activity => activity.profile))
@@ -1161,6 +1208,8 @@ function AgentDock({ mode = DEFAULT_DOCK_MODE, onToggleMode }) {
     if (reconciled !== stored) storage.set('active-jobs', reconciled)
     return reconciled
   })
+  const [subagentsByProfile, setSubagentsByProfile] = useState(() => storage.get('subagent-runs', {}))
+  const [expandedSubagents, setExpandedSubagents] = useState({})
   const [muted, setMuted] = useState(() => storage.get('muted', false))
   const [achievementToast, setAchievementToast] = useState(null)
   const [modelMenuPanel, setModelMenuPanel] = useState('advanced')
@@ -1265,6 +1314,10 @@ function AgentDock({ mode = DEFAULT_DOCK_MODE, onToggleMode }) {
   const draft = drafts[currentName] || ''
   const attachments = attachmentsByProfile[currentName] || []
   const activeJob = activeJobs[currentName] || null
+  const subagentSnapshot = subagentsByProfile[currentName] || null
+  const visibleSubagents = activeJob && activeJob.id !== subagentSnapshot?.job_id
+    ? []
+    : normalizeSubagents(subagentSnapshot?.subagents)
   const selectedActivityLabel = profileActivityLabel(activeJob)
   const activeJobIds = useMemo(
     () => Object.values(activeJobs).map(job => job?.id).filter(Boolean).sort().join('|'),
@@ -1417,6 +1470,11 @@ function AgentDock({ mode = DEFAULT_DOCK_MODE, onToggleMode }) {
       try {
         const job = await rest(`/jobs/${jobId}`)
         if (disposed || job.id !== jobId || activeJobsRef.current[profile]?.id !== jobId) return
+        setSubagentsByProfile(current => {
+          const next = updateProfileSubagents(current, profile, job)
+          if (next !== current) storage.set('subagent-runs', next)
+          return next
+        })
         updateActiveJobs(current =>
           current[profile]?.id === job.id
             ? { ...current, [profile]: { ...current[profile], ...job, profile } }
@@ -2265,6 +2323,70 @@ function AgentDock({ mode = DEFAULT_DOCK_MODE, onToggleMode }) {
                     }),
                     modelsQuery.isError
                       ? jsx('p', { className: 'text-[0.62rem] text-(--ui-danger)', children: 'The configured profile model could not be loaded.' })
+                      : null,
+                    visibleSubagents.length
+                      ? jsxs('div', {
+                          className: 'rounded-md border border-(--ui-stroke-secondary) bg-(--ui-control-hover-background)',
+                          'data-agent-dock-subagents': currentName,
+                          children: [
+                            jsxs('button', {
+                              'aria-expanded': expandedSubagents[currentName] === true,
+                              'aria-label': `${visibleSubagents.length} subagent${visibleSubagents.length === 1 ? '' : 's'} spawned by ${profileDisplayLabel(currentName)}`,
+                              className: 'flex h-7 w-full items-center gap-1.5 px-2 text-left text-[0.66rem] text-(--ui-text-secondary)',
+                              onClick: () => setExpandedSubagents(current => ({ ...current, [currentName]: current[currentName] !== true })),
+                              type: 'button',
+                              children: [
+                                jsx(Codicon, { name: expandedSubagents[currentName] === true ? 'chevron-down' : 'chevron-right', size: '0.68rem' }),
+                                jsx('span', { children: `Subagents (${visibleSubagents.length})` }),
+                                jsx('span', {
+                                  className: 'ml-auto text-[0.56rem] uppercase tracking-[0.08em] text-(--ui-text-quaternary)',
+                                  children: visibleSubagents.some(child => child.status === 'running') ? 'Running' : 'Finished'
+                                })
+                              ]
+                            }),
+                            expandedSubagents[currentName] === true
+                              ? jsx('ul', {
+                                  'aria-label': `Subagents spawned by ${profileDisplayLabel(currentName)}`,
+                                  className: 'space-y-1 border-t border-(--ui-stroke-secondary) px-2 py-1.5',
+                                  children: visibleSubagents.map(child => jsxs('li', {
+                                    className: 'rounded-md bg-(--ui-bg-secondary) px-2 py-1.5 text-[0.62rem]',
+                                    children: [
+                                      jsxs('div', {
+                                        className: 'flex min-w-0 items-center gap-1.5',
+                                        children: [
+                                          jsx('span', {
+                                            'aria-hidden': true,
+                                            className: cn('size-1.5 shrink-0 rounded-full', child.status === 'running' ? 'animate-pulse bg-(--ui-accent)' : 'bg-(--ui-text-quaternary)')
+                                          }),
+                                          jsx('span', { className: 'shrink-0 font-medium', children: `Subagent ${child.task_index + 1}` }),
+                                          child.current_tool
+                                            ? jsx('span', { className: 'min-w-0 truncate text-(--ui-text-quaternary)', children: child.current_tool })
+                                            : null,
+                                          jsx('span', {
+                                            className: 'ml-auto shrink-0 text-(--ui-text-tertiary)',
+                                            children: subagentStatusLabel(child.status)
+                                          })
+                                        ]
+                                      }),
+                                      jsxs('div', {
+                                        className: 'mt-1 flex min-w-0 items-center gap-1.5 text-[0.56rem] text-(--ui-text-quaternary)',
+                                        children: [
+                                          jsx('span', { children: child.model || 'Model unavailable' }),
+                                          jsx('span', { 'aria-hidden': true, children: '·' }),
+                                          jsx('span', {
+                                            children: child.usage_state === 'reported'
+                                              ? `${child.total_tokens.toLocaleString()} tokens · Reported`
+                                              : 'Tokens unavailable'
+                                          }),
+                                          jsx('span', { className: 'ml-auto shrink-0', children: 'Direct chat unavailable' })
+                                        ]
+                                      })
+                                    ]
+                                  }, child.subagent_id))
+                                })
+                              : null
+                          ]
+                        })
                       : null
                   ]
                 })
