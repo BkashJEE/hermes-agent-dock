@@ -334,6 +334,31 @@ function formatMessageTimestamp(value, locale, timeZone) {
   return new Intl.DateTimeFormat(locale || undefined, options).format(date)
 }
 
+function messageAttachmentMetadata(images) {
+  return Array.isArray(images)
+    ? images.map(image => ({
+        name: attachmentDisplayName(image.name),
+        mime_type: image.mime_type,
+        size: image.size
+      }))
+    : []
+}
+
+function attachmentDisplayName(name) {
+  const basename = String(name ?? '').split(/[\\/]/).pop()?.trim()
+  return basename || 'image'
+}
+
+async function copyTextToClipboard(text, clipboard = globalThis.navigator?.clipboard) {
+  if (!clipboard || typeof clipboard.writeText !== 'function') return 'unavailable'
+  try {
+    await clipboard.writeText(String(text ?? ''))
+    return 'copied'
+  } catch {
+    return 'failed'
+  }
+}
+
 function upsertProfileJob(jobs, profile, job) {
   return { ...jobs, [profile]: job }
 }
@@ -477,10 +502,37 @@ function interventionNeedsConfirmation(kind) {
   return normalizeInterventionKind(kind) === 'redirect'
 }
 
-function liveSessionsForProfile(rows, selectedProfile, runtimeProfile) {
-  if (!selectedProfile || selectedProfile !== runtimeProfile || !Array.isArray(rows)) return []
+function normalizeRuntimeProfile(value) {
+  if (typeof value !== 'string') return null
+  const normalized = value.trim().toLowerCase()
+  return /^[a-z0-9][a-z0-9_-]{0,63}$/.test(normalized) ? normalized : null
+}
+
+function knownProfileNames(profiles) {
+  if (!Array.isArray(profiles)) return []
+  return profiles
+    .map(profile => typeof profile === 'string' ? profile : profile?.name)
+    .map(normalizeRuntimeProfile)
+    .filter(Boolean)
+}
+
+function exactRuntimeProfile(selectedProfile, runtimeProfile, profiles) {
+  const selected = normalizeRuntimeProfile(selectedProfile)
+  const runtime = normalizeRuntimeProfile(runtimeProfile)
+  if (!selected || !runtime || selected !== runtime) return null
+  return knownProfileNames(profiles).includes(selected) ? selected : null
+}
+
+function liveSessionsForProfile(rows, selectedProfile, runtimeProfile, profiles) {
+  const exactProfile = exactRuntimeProfile(selectedProfile, runtimeProfile, profiles)
+  if (!exactProfile || !Array.isArray(rows)) return []
   return rows
-    .filter(row => row && typeof row.id === 'string' && typeof row.session_key === 'string')
+    .filter(row => (
+      row &&
+      typeof row.id === 'string' &&
+      typeof row.session_key === 'string' &&
+      (!row.profile || normalizeRuntimeProfile(row.profile) === exactProfile)
+    ))
     .map(row => ({
       id: row.id,
       session_key: row.session_key,
@@ -491,6 +543,50 @@ function liveSessionsForProfile(rows, selectedProfile, runtimeProfile) {
       subagent_id: typeof row.subagent_id === 'string' ? row.subagent_id : null,
       kanban_task_id: typeof row.kanban_task_id === 'string' ? row.kanban_task_id : null
     }))
+}
+
+function rebindCandidateForRun(rows, attachedRun, selectedProfile, runtimeProfile, profiles) {
+  const exactProfile = exactRuntimeProfile(selectedProfile, runtimeProfile, profiles)
+  if (!Array.isArray(rows) || !attachedRun || !exactProfile) return null
+  if (normalizeRuntimeProfile(attachedRun.profile) !== exactProfile) return null
+  if (
+    typeof attachedRun.session_id !== 'string' ||
+    !attachedRun.session_id ||
+    normalizeRuntimeProfile(attachedRun.runtime_profile) !== exactProfile ||
+    typeof attachedRun.runtime_session_id !== 'string' ||
+    !attachedRun.runtime_session_id
+  ) return null
+  return rows.find(row => (
+    row &&
+    typeof row.id === 'string' &&
+    typeof row.session_key === 'string' &&
+    row.id !== attachedRun.runtime_session_id &&
+    row.session_key === attachedRun.session_id
+  )) || null
+}
+
+function buildRebindPayload(attachedRun, selectedProfile, runtimeProfile, candidate, profiles) {
+  const exactProfile = exactRuntimeProfile(selectedProfile, runtimeProfile, profiles)
+  if (!exactProfile || !candidate || typeof candidate.id !== 'string' || !candidate.id) return null
+  if (
+    normalizeRuntimeProfile(attachedRun?.profile) !== exactProfile ||
+    typeof attachedRun?.session_id !== 'string' ||
+    !attachedRun.session_id ||
+    normalizeRuntimeProfile(attachedRun.runtime_profile) !== exactProfile ||
+    typeof attachedRun.runtime_session_id !== 'string' ||
+    !attachedRun.runtime_session_id ||
+    candidate.session_key !== attachedRun.session_id ||
+    candidate.id === attachedRun.runtime_session_id
+  ) return null
+  return {
+    profile: exactProfile,
+    session_id: attachedRun.session_id,
+    old_runtime_profile: exactProfile,
+    old_runtime_session_id: attachedRun.runtime_session_id,
+    runtime_profile: exactProfile,
+    runtime_session_id: candidate.id,
+    permission_scope: 'inherit-only'
+  }
 }
 
 function receiptLabel(state) {
@@ -923,12 +1019,30 @@ function SolvingWorkingOrb({ label = 'Agent working' }) {
 
 function MessageBubble({ message }) {
   const user = message.role === 'user'
+  const assistant = message.role === 'assistant'
   const timestamp = formatMessageTimestamp(message.created_at)
+  const attachments = Array.isArray(message.attachments)
+    ? message.attachments.filter(item => item && typeof item === 'object')
+    : []
+  const attachmentNames = attachments.map(item => attachmentDisplayName(item.name))
+  const attachmentCount = attachments.length
+  const copyMessage = async () => {
+    const result = await copyTextToClipboard(message.text)
+    if (result === 'unavailable') {
+      host.notify({ kind: 'error', message: 'Copy is unavailable in this Hermes surface.' })
+      return
+    }
+    if (result === 'copied') {
+      host.notify({ kind: 'success', message: 'Assistant message copied.' })
+    } else {
+      host.notify({ kind: 'error', message: 'Could not copy assistant message.' })
+    }
+  }
   return jsx('div', {
     className: cn('flex', user ? 'justify-end' : 'justify-start'),
     children: jsxs('div', {
       className: cn(
-        'max-w-[88%] rounded-xl px-3 py-2 text-[0.75rem] leading-relaxed whitespace-pre-wrap wrap-anywhere',
+        'max-w-[88%] rounded-xl px-3 py-1.5 text-[0.75rem] leading-relaxed whitespace-pre-wrap wrap-anywhere',
         user
           ? 'bg-[color-mix(in_srgb,var(--ui-accent)_18%,var(--ui-bg-elevated))] text-(--ui-text-primary)'
           : message.error
@@ -937,10 +1051,33 @@ function MessageBubble({ message }) {
       ),
       children: [
         jsx('p', { children: message.text }),
-        Array.isArray(message.attachments) && message.attachments.length
-          ? jsx('p', {
-              className: 'mt-1 text-[0.62rem] text-(--ui-text-tertiary)',
-              children: `Images · ${message.attachments.map(item => item.name).join(', ')}`
+        attachmentCount
+          ? jsxs('div', {
+              'aria-label': `${attachmentCount} image${attachmentCount === 1 ? '' : 's'} attached: ${attachmentNames.join(', ')}`,
+              className: 'mt-1.5 flex min-w-0 flex-wrap items-center gap-1',
+              'data-agent-dock-attachment-row': 'true',
+              children: [
+                jsxs('span', {
+                  className: 'inline-flex shrink-0 items-center gap-1 text-[0.61rem] font-medium text-(--ui-text-tertiary)',
+                  children: [
+                    jsx(Codicon, { 'aria-hidden': true, name: 'file-media', size: '0.68rem' }),
+                    jsx('span', { children: `${attachmentCount} image${attachmentCount === 1 ? '' : 's'}` })
+                  ]
+                }),
+                jsx('div', {
+                  className: 'contents',
+                  role: 'list',
+                  children: attachments.map((item, index) => jsxs('span', {
+                    className: 'inline-flex min-w-0 max-w-28 items-center gap-1 rounded-md border border-(--ui-stroke-secondary) bg-(--ui-bg-secondary) px-1.5 py-0.5 text-[0.61rem] text-(--ui-text-secondary)',
+                    role: 'listitem',
+                    title: attachmentNames[index],
+                    children: [
+                      jsx(Codicon, { 'aria-hidden': true, name: 'file-media', size: '0.65rem' }),
+                      jsx('span', { className: 'min-w-0 truncate', children: attachmentNames[index] })
+                    ]
+                  }, `${message.id}:attachment:${index}`))
+                })
+              ]
             })
           : null,
         message.receipt_state
@@ -949,11 +1086,38 @@ function MessageBubble({ message }) {
               children: `${message.intervention ? message.intervention.toUpperCase() : 'CONTROL'} · ${receiptLabel(message.receipt_state)}`
             })
           : null,
-        jsx('p', {
-          className: 'mt-1 text-[0.56rem] tabular-nums tracking-[0.04em] text-(--ui-text-quaternary)',
-          children: `${user
-            ? message.assignment ? 'You · Task assignment' : 'You'
-            : profileDisplayLabel(message.profile)} · ${timestamp}`
+        jsxs('div', {
+          'aria-label': `${user
+            ? message.assignment ? 'You, task assignment' : 'You'
+            : profileDisplayLabel(message.profile)}, ${timestamp}`,
+          className: 'mt-0.5 flex h-4 items-center gap-1 text-[0.56rem] leading-none text-(--ui-text-quaternary)',
+          'data-agent-dock-message-footer': 'true',
+          children: [
+            jsx('span', {
+              className: 'min-w-0 flex-1 truncate tracking-[0.04em]',
+              title: user
+                ? message.assignment ? 'You · Task assignment' : 'You'
+                : profileDisplayLabel(message.profile),
+              children: user
+                ? message.assignment ? 'You · Task assignment' : 'You'
+                : profileDisplayLabel(message.profile)
+            }),
+            jsx('span', {
+              className: 'shrink-0 tabular-nums tracking-[0.04em]',
+              children: timestamp
+            }),
+            assistant
+              ? jsx('button', {
+                  'aria-label': 'Copy assistant message',
+                  className: 'inline-flex size-4 shrink-0 items-center justify-center rounded text-(--ui-text-tertiary) hover:bg-(--ui-control-hover-background) hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-(--ui-accent)',
+                  'data-agent-dock-copy': 'true',
+                  onClick: () => void copyMessage(),
+                  title: 'Copy assistant message',
+                  type: 'button',
+                  children: jsx(Codicon, { 'aria-hidden': true, name: 'copy', size: '0.68rem' })
+                })
+              : null
+          ]
         })
       ]
     })
@@ -961,8 +1125,8 @@ function MessageBubble({ message }) {
 }
 
 function AgentDock({ mode = DEFAULT_DOCK_MODE, onToggleMode }) {
-  const runtimeProfile = useValue(host.state.profile) || 'default'
-  const foregroundRuntimeSessionId = useValue(host.state.activeSessionId) || ''
+  const runtimeProfile = normalizeRuntimeProfile(useValue(host.state.profile))
+  const foregroundRuntimeSessionId = String(useValue(host.state.activeSessionId) ?? '').trim()
   const profilesQuery = useQuery({ queryKey: [ID, 'profiles'], queryFn: () => rest('/profiles'), refetchInterval: 20_000 })
   const achievementsQuery = useQuery({
     queryKey: [ID, 'achievements'],
@@ -986,6 +1150,7 @@ function AgentDock({ mode = DEFAULT_DOCK_MODE, onToggleMode }) {
   const [assignTask, setAssignTask] = useState(false)
   const [interventionKind, setInterventionKind] = useState('ask')
   const [attachedRunIds, setAttachedRunIds] = useState(() => storage.get('attached-control-runs', {}))
+  const [boundRuntimeSessionIds, setBoundRuntimeSessionIds] = useState({})
   const [candidateSessionIds, setCandidateSessionIds] = useState({})
   const [pendingConfirmedAction, setPendingConfirmedAction] = useState(null)
   const [drafts, setDrafts] = useState(() => storage.get('drafts', {}))
@@ -1019,8 +1184,8 @@ function AgentDock({ mode = DEFAULT_DOCK_MODE, onToggleMode }) {
     refetchInterval: 2_500
   })
   const liveSessions = useMemo(
-    () => liveSessionsForProfile(activeSessionsQuery.data?.sessions, currentName, runtimeProfile),
-    [activeSessionsQuery.data, currentName, runtimeProfile]
+    () => liveSessionsForProfile(activeSessionsQuery.data?.sessions, currentName, runtimeProfile, profiles),
+    [activeSessionsQuery.data, currentName, runtimeProfile, profiles]
   )
   const controlRunsQuery = useQuery({
     queryKey: [ID, 'control-runs', currentName],
@@ -1030,7 +1195,12 @@ function AgentDock({ mode = DEFAULT_DOCK_MODE, onToggleMode }) {
   })
   const attachedRunId = attachedRunIds[currentName] || ''
   const attachedRun = (controlRunsQuery.data?.runs || []).find(run => run.run_id === attachedRunId) || null
-  const attachedLiveSession = liveSessions.find(session => session.id === attachedRun?.runtime_session_id) || null
+  const attachedRuntimeSessionId = boundRuntimeSessionIds[attachedRunId] || attachedRun?.runtime_session_id || ''
+  const attachedControlRun = attachedRun && attachedRuntimeSessionId
+    ? { ...attachedRun, runtime_session_id: attachedRuntimeSessionId }
+    : attachedRun
+  const attachedLiveSession = liveSessions.find(session => session.id === attachedRuntimeSessionId) || null
+  const candidateRebindSession = rebindCandidateForRun(liveSessions, attachedRun, currentName, runtimeProfile, profiles)
   const candidateSessionId = candidateSessionIds[currentName] || liveSessions[0]?.id || ''
   const candidateLiveSession = liveSessions.find(session => session.id === candidateSessionId) || liveSessions[0] || null
   const controlHistoryQuery = useQuery({
@@ -1360,12 +1530,56 @@ function AgentDock({ mode = DEFAULT_DOCK_MODE, onToggleMode }) {
     host.notify({ kind: 'success', message: `Attached to ${session.title || 'live Hermes run'}` })
   }
 
+  const reattachLiveSession = async () => {
+    const payload = buildRebindPayload(attachedRun, currentName, runtimeProfile, candidateRebindSession, profiles)
+    if (attachedLiveSession || !payload || !candidateRebindSession) {
+      host.notify({ kind: 'error', message: 'Reattach failed: no exact replacement Hermes runtime is available for this run.' })
+      return false
+    }
+    let rebound
+    try {
+      rebound = await rest(`/control/runs/${encodeURIComponent(attachedRun.run_id)}/rebind`, {
+        method: 'POST',
+        body: payload
+      })
+    } catch (error) {
+      const detail = String(error?.message || error || 'Hermes did not confirm the rebind.').trim().slice(0, 240)
+      host.notify({ kind: 'error', message: `Reattach failed: ${detail}` })
+      return false
+    }
+    const reboundRuntimeProfile = normalizeRuntimeProfile(rebound?.runtime_profile)
+    const reboundRuntimeSessionId = typeof rebound?.runtime_session_id === 'string'
+      ? rebound.runtime_session_id.trim()
+      : ''
+    if (reboundRuntimeProfile !== runtimeProfile || reboundRuntimeSessionId !== candidateRebindSession.id) {
+      host.notify({ kind: 'error', message: 'Reattach failed: Hermes did not confirm the exact replacement runtime.' })
+      return false
+    }
+    setBoundRuntimeSessionIds(current => ({ ...current, [attachedRun.run_id]: reboundRuntimeSessionId }))
+    try {
+      await Promise.all([
+        controlRunsQuery.refetch?.(),
+        activeSessionsQuery.refetch?.(),
+        controlHistoryQuery.refetch?.()
+      ])
+    } catch (error) {
+      const detail = String(error?.message || error || 'the refreshed runtime state is unavailable.').trim().slice(0, 200)
+      host.notify({ kind: 'error', message: `Reattached live to ${candidateRebindSession.title || 'Hermes run'}, but refresh failed: ${detail}` })
+      return true
+    }
+    haptic('success')
+    host.notify({ kind: 'success', message: `Reattached live to ${candidateRebindSession.title || 'Hermes run'}` })
+    return true
+  }
+
   const claimControlMessage = messageId => rest(`/control/messages/${encodeURIComponent(messageId)}/claim`, {
     method: 'POST',
     body: {
       dispatcher_id: `desktop:${runtimeProfile}`,
       profile: currentName,
       session_id: attachedRun.session_id,
+      runtime_profile: runtimeProfile,
+      runtime_session_id: attachedControlRun.runtime_session_id,
       lease_seconds: 300
     }
   })
@@ -1380,6 +1594,8 @@ function AgentDock({ mode = DEFAULT_DOCK_MODE, onToggleMode }) {
         verification: state === 'unknown' ? 'unverified' : 'observed',
         profile: currentName,
         session_id: attachedRun.session_id,
+        runtime_profile: runtimeProfile,
+        runtime_session_id: attachedControlRun.runtime_session_id,
         dispatch_token: token,
         detail
       }
@@ -1428,7 +1644,7 @@ function AgentDock({ mode = DEFAULT_DOCK_MODE, onToggleMode }) {
     let terminalReceiptRecorded = false
     try {
       const result = await host.request(interventionMethod(normalizedKind), {
-        session_id: attachedRun.runtime_session_id,
+        session_id: attachedControlRun.runtime_session_id,
         text
       })
       const gatewayStatus = String(result?.status || 'accepted')
@@ -1487,7 +1703,7 @@ function AgentDock({ mode = DEFAULT_DOCK_MODE, onToggleMode }) {
     })
     const claim = await claimControlMessage(messageId)
     try {
-      const result = await host.request('session.interrupt', { session_id: attachedRun.runtime_session_id })
+      const result = await host.request('session.interrupt', { session_id: attachedControlRun.runtime_session_id })
       const gatewayStatus = String(result?.status || 'accepted')
       const receiptState = gatewayStatus === 'rejected' ? 'rejected' : 'accepted'
       await recordControlReceipt(messageId, receiptState, {
@@ -1635,7 +1851,7 @@ function AgentDock({ mode = DEFAULT_DOCK_MODE, onToggleMode }) {
       role: 'user',
       profile,
       text: message || `Attached ${images.length} image${images.length === 1 ? '' : 's'} for analysis.`,
-      attachments: images.map(image => ({ name: image.name, mime_type: image.mime_type, size: image.size })),
+      attachments: messageAttachmentMetadata(images),
       assignment,
       created_at: Date.now()
     }
@@ -2069,6 +2285,21 @@ function AgentDock({ mode = DEFAULT_DOCK_MODE, onToggleMode }) {
                   ? `Live · ${attachedLiveSession.title} · ${attachedLiveSession.status}`
                   : 'Attached run unavailable · dispatch disabled'
               }, 'live-title'),
+              !attachedLiveSession && candidateRebindSession
+                ? jsx('button', {
+                    'aria-label': 'Reattach live',
+                    className: 'shrink-0 rounded bg-(--ui-accent) px-2 py-1 text-[0.6rem] font-medium text-(--ui-accent-foreground)',
+                    onClick: () => {
+                      void reattachLiveSession().catch(error => {
+                        const detail = String(error?.message || error || 'Hermes did not confirm the rebind.').trim().slice(0, 240)
+                        host.notify({ kind: 'error', message: `Reattach failed: ${detail}` })
+                      })
+                    },
+                    title: `Reattach live to ${candidateRebindSession.title || 'the exact matching Hermes run'}`,
+                    type: 'button',
+                    children: 'Reattach live'
+                  }, 'reattach')
+                : null,
               jsx('button', {
                 className: 'text-[0.6rem] text-(--ui-text-quaternary) hover:text-foreground',
                 disabled: true,

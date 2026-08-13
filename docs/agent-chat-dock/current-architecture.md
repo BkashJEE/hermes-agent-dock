@@ -1,5 +1,7 @@
 # Agent Dock current architecture
 
+> **Historical baseline — not current acceptance authority.** This file captures the pre-control-plane architecture. Agent Dock v0.3.0 subsequently added the durable SQLite control store, exact run/runtime bindings, queued interventions, leases, receipts, and privacy-reduced events. Use `PRODUCT_SPEC.md`, `backend/dashboard/control_store.py`, and `docs/agent-chat-dock/v0.4-limitations-roadmap.md` for current behavior and active work.
+
 ## Scope
 
 This document describes the repository at the pre-control-plane baseline. It separates observed behavior from proposed behavior.

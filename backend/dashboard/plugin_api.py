@@ -53,6 +53,16 @@ ConfirmationRequired = _CONTROL_MODULE.ConfirmationRequired
 TransitionError = _CONTROL_MODULE.TransitionError
 LeaseError = _CONTROL_MODULE.LeaseError
 
+_JOB_SPEC = importlib.util.spec_from_file_location(
+    "hermes_agent_dock_job_store",
+    Path(__file__).resolve().with_name("job_store.py"),
+)
+if _JOB_SPEC is None or _JOB_SPEC.loader is None:  # pragma: no cover - installation corruption
+    raise RuntimeError("Agent Dock job store is unavailable")
+_JOB_MODULE = importlib.util.module_from_spec(_JOB_SPEC)
+_JOB_SPEC.loader.exec_module(_JOB_MODULE)
+JobStore = _JOB_MODULE.JobStore
+
 router = APIRouter()
 
 PLUGIN_VERSION = "0.3.0"
@@ -83,6 +93,10 @@ _CATALOG_LOCK = threading.RLock()
 _CONTROL_LOCK = threading.RLock()
 _CONTROL_STORE: Any | None = None
 _CONTROL_STORE_HOME: Path | None = None
+_JOB_STORE_LOCK = threading.RLock()
+_JOB_STORE: Any | None = None
+_JOB_STORE_HOME: Path | None = None
+_JOB_STORE_REHYDRATED = False
 
 
 class ImageAttachment(BaseModel):
@@ -182,6 +196,16 @@ class AttachRunRequest(BaseModel):
     kanban_task_id: str | None = None
 
 
+class RebindRunRequest(BaseModel):
+    profile: str
+    session_id: str
+    old_runtime_profile: str
+    old_runtime_session_id: str
+    runtime_profile: str
+    runtime_session_id: str
+    permission_scope: str
+
+
 class ControlMessageRequest(BaseModel):
     message_id: str
     run_id: str
@@ -204,6 +228,8 @@ class ClaimMessageRequest(BaseModel):
     dispatcher_id: str
     profile: str
     session_id: str
+    runtime_profile: str
+    runtime_session_id: str
     lease_seconds: float = Field(default=30, ge=1, le=300)
 
 
@@ -214,6 +240,8 @@ class ReceiptRequest(BaseModel):
     verification: str
     profile: str
     session_id: str
+    runtime_profile: str
+    runtime_session_id: str
     dispatch_token: str | None = None
     source_id: str | None = None
     detail: dict[str, Any] = Field(default_factory=dict)
@@ -250,6 +278,98 @@ def _control_store() -> Any:
             _CONTROL_STORE = ControlStore(hermes_home=home)
             _CONTROL_STORE_HOME = home
         return _CONTROL_STORE
+
+
+def _job_key(profile_id: str, request_id: str | None) -> str | None:
+    if request_id is None:
+        return None
+    return f"{profile_id}:{request_id}"
+
+
+def _memory_job_from_row(row: dict[str, Any], existing: dict[str, Any] | None = None) -> dict[str, Any]:
+    response = None
+    if existing and existing.get("_attempt_token") == row.get("attempt_token"):
+        response = existing.get("response")
+    return {
+        "id": row["job_id"],
+        "profile": row["profile_id"],
+        "model": row.get("model"),
+        "provider": row.get("provider"),
+        "reasoning_effort": row.get("reasoning_effort") or "none",
+        "fast": bool(row.get("fast")),
+        "request_id": row.get("request_id"),
+        # `starting` is the durable pre-worker reservation state. The public
+        # API retains its established `queued` presentation until the worker
+        # wins the exact-attempt transition to `running`.
+        "status": "queued" if row.get("status") == "starting" else row.get("status"),
+        "created_at": row.get("created_at"),
+        "started_at": row.get("started_at"),
+        "finished_at": row.get("finished_at"),
+        "session_id": row.get("session_id"),
+        "response": response,
+        "error": row.get("error_summary"),
+        "kanban_task_id": row.get("kanban_task_id"),
+        "kanban_board": row.get("kanban_board"),
+        "kanban_error": existing.get("kanban_error") if existing else None,
+        "image_count": int(row.get("image_count") or 0),
+        "_attempt_token": row.get("attempt_token"),
+    }
+
+
+def _rehydrate_jobs(store: Any) -> None:
+    rows = store.list_jobs()
+    with _JOBS_LOCK:
+        for row in rows:
+            existing = _JOBS.get(row["job_id"])
+            _JOBS[row["job_id"]] = _memory_job_from_row(row, existing)
+            request_key = _job_key(row["profile_id"], row.get("request_id"))
+            if request_key:
+                _REQUEST_JOBS[request_key] = row["job_id"]
+
+
+def _job_store() -> Any:
+    global _JOB_STORE, _JOB_STORE_HOME, _JOB_STORE_REHYDRATED
+    home = Path(get_hermes_home()).resolve()
+    with _JOB_STORE_LOCK:
+        if _JOB_STORE is None or _JOB_STORE_HOME != home:
+            if _JOB_STORE is not None:
+                _JOB_STORE.close()
+            _JOB_STORE = JobStore(hermes_home=home)
+            _JOB_STORE_HOME = home
+            _JOB_STORE_REHYDRATED = False
+        if not _JOB_STORE_REHYDRATED:
+            _rehydrate_jobs(_JOB_STORE)
+            _JOB_STORE_REHYDRATED = True
+        return _JOB_STORE
+
+
+def _reset_job_store_for_tests(*, clear_memory: bool = True) -> None:
+    """Reset the lazy ledger without touching the live Hermes home."""
+    global _JOB_STORE, _JOB_STORE_HOME, _JOB_STORE_REHYDRATED
+    with _JOB_STORE_LOCK:
+        if _JOB_STORE is not None:
+            _JOB_STORE.close()
+        _JOB_STORE = None
+        _JOB_STORE_HOME = None
+        _JOB_STORE_REHYDRATED = False
+    if clear_memory:
+        with _JOBS_LOCK:
+            _JOBS.clear()
+            _REQUEST_JOBS.clear()
+
+
+def _load_durable_job(job_id: str) -> dict[str, Any] | None:
+    row = _job_store().get_job(job_id)
+    if row is None:
+        return None
+    with _JOBS_LOCK:
+        existing = _JOBS.get(job_id)
+        job = _memory_job_from_row(row, existing)
+        _JOBS[job_id] = job
+        request_key = _job_key(row["profile_id"], row.get("request_id"))
+        if request_key:
+            _REQUEST_JOBS[request_key] = job_id
+        return job
 
 
 def _control_error(exc: Exception) -> HTTPException:
@@ -485,6 +605,23 @@ def _safe_runner_error(stderr: str, returncode: int) -> str:
         detail = redact_sensitive_text(detail)
     except Exception:
         detail = "Hermes runner failed; inspect local Hermes logs"
+    detail = re.sub(
+        r"(?i)\bauthorization\s*[:=]\s*(?:bearer\s+)?[^\s,;}]+",
+        "authorization=[REDACTED]",
+        detail,
+    )
+    detail = re.sub(
+        r"(?i)\b(api[_-]?key|token|password|secret)\s*[:=]\s*[^\s,;}]+",
+        lambda match: f"{match.group(1)}=[REDACTED]",
+        detail,
+    )
+    detail = re.sub(r"(?i)\b[A-Z]:\\[^\n,;}]+", "[PRIVATE_PATH]", detail)
+    detail = re.sub(r"\\\\[^\n,;}]+", "[PRIVATE_PATH]", detail)
+    detail = re.sub(
+        r"(?i)(?:/home/|/Users/|/tmp/|/var/|/etc/|/opt/|/srv/)[^\n,;}]+",
+        "[PRIVATE_PATH]",
+        detail,
+    )
     return f"Agent session failed: {detail}"[:500]
 
 
@@ -655,7 +792,30 @@ def _child_env() -> dict[str, str]:
 
 
 def _public_job(job: dict[str, Any]) -> dict[str, Any]:
-    return {key: value for key, value in job.items() if not key.startswith("_")}
+    # Whitelist the transport contract rather than merely stripping one known
+    # private key.  This prevents attempt tokens, process handles, prompts,
+    # paths, and future internal bookkeeping from leaking accidentally.
+    public_keys = {
+        "id",
+        "profile",
+        "model",
+        "provider",
+        "reasoning_effort",
+        "fast",
+        "request_id",
+        "status",
+        "created_at",
+        "started_at",
+        "finished_at",
+        "session_id",
+        "response",
+        "error",
+        "kanban_task_id",
+        "kanban_board",
+        "kanban_error",
+        "image_count",
+    }
+    return {key: value for key, value in job.items() if key in public_keys}
 
 
 def _evict_completed_jobs(now: int | None = None) -> None:
@@ -665,7 +825,7 @@ def _evict_completed_jobs(now: int | None = None) -> None:
         terminal = []
         remove: set[str] = set()
         for job_id, job in _JOBS.items():
-            if job.get("status") not in {"done", "error", "cancelled"}:
+            if job.get("status") not in {"done", "error", "cancelled", "interrupted"}:
                 continue
             finished = int(job.get("finished_at") or job.get("created_at") or current)
             terminal.append((finished, job_id))
@@ -700,24 +860,62 @@ def _runner_payload(request: SendRequest, image_paths: list[Path] | None = None)
     return json.dumps(payload, ensure_ascii=False)
 
 
-def _begin_job_finalization(job_id: str, response: str, session_id: str | None) -> bool:
-    """Atomically win the cancellation race before linked-card settlement."""
+def _begin_job_finalization(
+    job_id: str,
+    response: str,
+    session_id: str | None,
+    attempt_token: str | None = None,
+) -> bool:
+    """CAS the durable attempt before linked-card settlement."""
+    with _JOBS_LOCK:
+        memory_job = _JOBS.get(job_id)
+        memory_token = memory_job.get("_attempt_token") if memory_job else None
+    store = _job_store()
+    durable = store.get_job(job_id)
+    if durable is not None:
+        token = attempt_token or memory_token or durable.get("attempt_token")
+        if not token or not store.begin_finalization(job_id, token, session_id=session_id):
+            return False
+        with _JOBS_LOCK:
+            job = _JOBS.get(job_id) or _memory_job_from_row(durable)
+            job.update(
+                {
+                    "status": "finalizing",
+                    "response": response,
+                    "session_id": session_id,
+                    "_attempt_token": token,
+                }
+            )
+            _JOBS[job_id] = job
+        return True
+
+    # Keep direct unit-level worker probes that construct an in-memory job
+    # compatible; production-created jobs always have a durable row.
     with _JOBS_LOCK:
         job = _JOBS.get(job_id)
         if not job or job.get("status") == "cancelled":
             return False
-        job.update(
-            {
-                "status": "finalizing",
-                "response": response,
-                "session_id": session_id,
-            }
-        )
+        job.update({"status": "finalizing", "response": response, "session_id": session_id})
         return True
 
 
-def _publish_job_success(job_id: str) -> bool:
-    """Expose terminal success only after optional Kanban settlement finishes."""
+def _publish_job_success(job_id: str, attempt_token: str | None = None) -> bool:
+    """Expose terminal success only after the exact attempt wins its CAS."""
+    with _JOBS_LOCK:
+        memory_job = _JOBS.get(job_id)
+        memory_token = memory_job.get("_attempt_token") if memory_job else None
+    store = _job_store()
+    durable = store.get_job(job_id)
+    if durable is not None:
+        token = attempt_token or memory_token or durable.get("attempt_token")
+        if not token or not store.complete_done(job_id, token):
+            return False
+        with _JOBS_LOCK:
+            job = _JOBS.get(job_id) or _memory_job_from_row(durable)
+            job.update({"status": "done", "finished_at": int(time.time()), "_attempt_token": token})
+            _JOBS[job_id] = job
+        return True
+
     with _JOBS_LOCK:
         job = _JOBS.get(job_id)
         if not job or job.get("status") != "finalizing":
@@ -762,15 +960,35 @@ def _terminate_process(process: subprocess.Popen[str] | None, platform: str | No
 def _run_job(job_id: str, request: SendRequest) -> None:
     process: subprocess.Popen[str] | None = None
     image_dir: Path | None = None
+    store = _job_store()
     with _JOBS_LOCK:
         job = _JOBS.get(job_id)
-        if not job or job["status"] == "cancelled":
-            return
-        job["status"] = "running"
-        job["started_at"] = int(time.time())
+    durable_row = store.get_job(job_id)
+    if job is None and durable_row is not None:
+        job = _load_durable_job(job_id)
+    if not job or durable_row is None:
+        return
+
+    attempt_token = job.get("_attempt_token")
+    if not attempt_token or not store.mark_running(job_id, attempt_token):
+        return
+    with _JOBS_LOCK:
+        current = _JOBS.get(job_id)
+        if current:
+            current.update({"status": "running", "started_at": int(time.time())})
+
+    def attempt_is_running() -> bool:
+        row = store.get_job(job_id)
+        return bool(
+            row
+            and row.get("attempt_token") == attempt_token
+            and row.get("status") == "running"
+        )
 
     try:
         command = _build_command(request)
+        if not attempt_is_running():
+            return
         image_paths, image_dir = _materialize_job_images(request.profile, request.images, job_id)
         child_env = _catalog_environment(request.profile)
         popen_kwargs: dict[str, Any] = {
@@ -789,17 +1007,17 @@ def _run_job(job_id: str, request: SendRequest) -> None:
             popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
         else:
             popen_kwargs["start_new_session"] = True
-        with _JOBS_LOCK:
-            job = _JOBS.get(job_id)
-            if not job or job["status"] == "cancelled":
-                return
+        if not attempt_is_running():
+            return
         process = subprocess.Popen(**popen_kwargs)
         attached = False
         with _JOBS_LOCK:
-            job = _JOBS.get(job_id)
-            if job and job["status"] != "cancelled":
-                job["_process"] = process
+            current = _JOBS.get(job_id)
+            if current and current.get("status") not in {"cancelled", "cancelling", "interrupted"}:
+                current["_process"] = process
                 attached = True
+        if not attempt_is_running():
+            attached = False
         if not attached:
             _terminate_process(process)
             return
@@ -812,10 +1030,8 @@ def _run_job(job_id: str, request: SendRequest) -> None:
             _terminate_process(process)
             raise RuntimeError("Agent session exceeded the 15 minute timeout")
 
-        with _JOBS_LOCK:
-            job = _JOBS.get(job_id)
-            if not job or job["status"] == "cancelled":
-                return
+        if not attempt_is_running():
+            return
 
         match = SESSION_LINE_RE.search(stderr or "")
         session_id = match.group(1) if match and SESSION_ID_RE.fullmatch(match.group(1)) else request.session_id
@@ -823,10 +1039,16 @@ def _run_job(job_id: str, request: SendRequest) -> None:
             raise RuntimeError(_safe_runner_error(stderr or "", process.returncode))
 
         response = _trim((stdout or "").strip())
-        if not _begin_job_finalization(job_id, response, session_id):
+        if not _begin_job_finalization(job_id, response, session_id, attempt_token):
             return
+
+        if not store.publish(job_id, attempt_token):
+            return
+        with _JOBS_LOCK:
+            current = _JOBS.get(job_id)
+            if current:
+                current.update({"status": "done", "finished_at": int(time.time())})
         _settle_job_kanban(job_id, "done", response or "Agent returned no response text")
-        _publish_job_success(job_id)
     except Exception as exc:
         message = f"Image attachment rejected: {exc}" if request.images and isinstance(exc, ValueError) else str(exc)
         if (
@@ -835,21 +1057,27 @@ def _run_job(job_id: str, request: SendRequest) -> None:
             and "timeout" not in message.lower()
         ):
             message = "Agent session could not start. Check the selected profile and Hermes logs."
-        with _JOBS_LOCK:
-            settle_error = bool(_JOBS.get(job_id) and _JOBS[job_id]["status"] != "cancelled")
-        if settle_error:
+
+        won_error = store.complete_error(job_id, attempt_token, message)
+        if won_error:
+            with _JOBS_LOCK:
+                current = _JOBS.get(job_id)
+                if current:
+                    current.update(
+                        {
+                            "status": "error",
+                            "error": message[:500],
+                            "finished_at": int(time.time()),
+                        }
+                    )
             _settle_job_kanban(job_id, "error", message)
-        with _JOBS_LOCK:
-            job = _JOBS.get(job_id)
-            if job and job["status"] != "cancelled":
-                job.update({"status": "error", "error": message[:500], "finished_at": int(time.time())})
     finally:
         if image_dir is not None:
             shutil.rmtree(image_dir, ignore_errors=True)
         with _JOBS_LOCK:
-            job = _JOBS.get(job_id)
-            if job:
-                job.pop("_process", None)
+            current = _JOBS.get(job_id)
+            if current:
+                current.pop("_process", None)
 
 
 @router.get("/health")
@@ -941,6 +1169,31 @@ def attach_control_run(request: AttachRunRequest) -> dict[str, Any]:
         raise _control_error(exc) from exc
 
 
+@router.post("/control/runs/{run_id}/rebind")
+def rebind_control_run(run_id: str, request: RebindRunRequest) -> dict[str, Any]:
+    selected_profile = _known_control_profile(request.profile)
+    try:
+        old_runtime_profile = _normalize_profile(request.old_runtime_profile)
+        runtime_profile = _normalize_profile(request.runtime_profile)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    if selected_profile != old_runtime_profile or selected_profile != runtime_profile:
+        raise HTTPException(status_code=409, detail="Selected profile does not own this Desktop runtime")
+    try:
+        return _control_store().rebind_run_runtime(
+            run_id=run_id,
+            profile=selected_profile,
+            session_id=request.session_id,
+            old_runtime_profile=old_runtime_profile,
+            old_runtime_session_id=request.old_runtime_session_id,
+            runtime_profile=runtime_profile,
+            runtime_session_id=request.runtime_session_id,
+            permission_scope=request.permission_scope,
+        )
+    except Exception as exc:
+        raise _control_error(exc) from exc
+
+
 @router.get("/control/runs/{run_id}")
 def control_run(run_id: str, profile: str, session_id: str) -> dict[str, Any]:
     normalized = _known_control_profile(profile)
@@ -999,6 +1252,9 @@ def enqueue_control_message(request: ControlMessageRequest) -> dict[str, Any]:
 @router.post("/control/messages/{message_id}/claim")
 def claim_control_message(message_id: str, request: ClaimMessageRequest) -> dict[str, Any]:
     normalized = _known_control_profile(request.profile)
+    runtime_profile = _known_control_profile(request.runtime_profile)
+    if runtime_profile != normalized:
+        raise HTTPException(status_code=409, detail="Selected profile does not own this Desktop runtime")
     try:
         message = _control_store().get_message(message_id)
         if message is None:
@@ -1010,6 +1266,8 @@ def claim_control_message(message_id: str, request: ClaimMessageRequest) -> dict
             raise BindingError("run not found")
         return _control_store().claim_message(
             message_id,
+            runtime_profile=runtime_profile,
+            runtime_session_id=request.runtime_session_id,
             dispatcher_id=request.dispatcher_id,
             lease_seconds=request.lease_seconds,
         )
@@ -1020,6 +1278,9 @@ def claim_control_message(message_id: str, request: ClaimMessageRequest) -> dict
 @router.post("/control/messages/{message_id}/receipts")
 def record_control_receipt(message_id: str, request: ReceiptRequest) -> dict[str, Any]:
     normalized = _known_control_profile(request.profile)
+    runtime_profile = _known_control_profile(request.runtime_profile)
+    if runtime_profile != normalized:
+        raise HTTPException(status_code=409, detail="Selected profile does not own this Desktop runtime")
     try:
         message = _control_store().get_message(message_id)
         if message is None:
@@ -1031,6 +1292,8 @@ def record_control_receipt(message_id: str, request: ReceiptRequest) -> dict[str
             raise BindingError("run not found")
         row = _control_store().record_receipt(
             message_id=message_id,
+            runtime_profile=runtime_profile,
+            runtime_session_id=request.runtime_session_id,
             receipt_id=request.receipt_id,
             state=request.state,
             verification=request.verification,
@@ -1085,16 +1348,32 @@ def create_job(request: SendRequest) -> dict[str, Any]:
     request_id = (request.request_id or "").strip()
     if request.assign_task and not request_id:
         raise HTTPException(status_code=400, detail="request_id is required for Kanban assignment")
-    request_key = f"{request.profile.strip().lower()}:{request_id}" if request_id else None
+    profile_id = request.profile.strip().lower()
+    request_key = _job_key(profile_id, request_id or None)
+    store = _job_store()
 
     # A transport retry must resolve from the reservation ledger even when
     # provider discovery is temporarily unavailable. Re-check after validation
     # as well so concurrent first submissions still reserve exactly one job.
     if request_key:
-        with _JOBS_LOCK:
-            existing_id = _REQUEST_JOBS.get(request_key)
-            existing = _JOBS.get(existing_id or "")
-            if existing:
+        existing_row = store.get_by_request(profile_id, request_id)
+        if existing_row is not None:
+            if existing_row.get("assign_task") and not existing_row.get("kanban_task_id"):
+                # The winner performs external assignment after committing the
+                # reservation. Concurrent duplicates wait without holding a
+                # SQLite write transaction or repeating the side effect.
+                for _ in range(100):
+                    if existing_row.get("status") not in {"starting", "queued"}:
+                        break
+                    time.sleep(0.05)
+                    refreshed = store.get_job(existing_row["job_id"])
+                    if refreshed is None:
+                        break
+                    existing_row = refreshed
+                    if existing_row.get("kanban_task_id"):
+                        break
+            existing = _load_durable_job(existing_row["job_id"])
+            if existing is not None:
                 return _public_job(existing)
 
     try:
@@ -1105,47 +1384,83 @@ def create_job(request: SendRequest) -> dict[str, Any]:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
     with _JOBS_LOCK:
-        if request_key:
-            existing_id = _REQUEST_JOBS.get(request_key)
-            existing = _JOBS.get(existing_id or "")
-            if existing:
-                return _public_job(existing)
-        active = sum(1 for job in _JOBS.values() if job["status"] in {"queued", "running"})
+        active = sum(
+            1
+            for job in _JOBS.values()
+            if job["status"] in {"starting", "queued", "running", "finalizing", "cancelling"}
+        )
         if active >= MAX_CONCURRENT_JOBS:
             raise HTTPException(status_code=429, detail="Agent Dock already has four active sessions")
-        job_id = uuid.uuid4().hex
+
+    provisional_job_id = uuid.uuid4().hex
+    try:
+        row, created = store.reserve_job(
+            job_id=provisional_job_id,
+            profile_id=profile_id,
+            request_id=request_id or None,
+            provider=(request.provider or "").strip() or None,
+            model=(request.model or "").strip() or None,
+            reasoning_effort=request.reasoning_effort or "none",
+            fast=bool(request.fast),
+            assign_task=bool(request.assign_task),
+            image_count=len(request.images),
+            session_id=request.session_id,
+            kanban_task_id=None,
+            kanban_board=None,
+        )
+    except (PermissionError, RuntimeError, ValueError, OSError) as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Agent Dock job reservation failed; inspect local Hermes logs",
+        ) from exc
+    if not created and row.get("assign_task") and not row.get("kanban_task_id"):
+        for _ in range(100):
+            if row.get("status") not in {"starting", "queued"}:
+                break
+            time.sleep(0.05)
+            refreshed = store.get_job(row["job_id"])
+            if refreshed is None:
+                break
+            row = refreshed
+            if row.get("kanban_task_id"):
+                break
+    if created and request.assign_task:
         try:
-            kanban_task_id = _create_kanban_task(request, job_id)
+            task_id = _create_kanban_task(request, row["job_id"])
+            if task_id and not store.update_kanban(
+                row["job_id"],
+                row["attempt_token"],
+                kanban_task_id=task_id,
+                kanban_board=KANBAN_BOARD,
+            ):
+                raise RuntimeError("Durable job authority changed during Kanban assignment")
+            row = store.get_job(row["job_id"]) or row
         except (PermissionError, RuntimeError, ValueError, OSError) as exc:
+            store.complete_error(
+                row["job_id"],
+                row["attempt_token"],
+                "Kanban assignment failed; inspect local Hermes logs",
+            )
             raise HTTPException(
                 status_code=503,
                 detail="Kanban assignment failed; inspect local Hermes logs",
             ) from exc
-        _JOBS[job_id] = {
-            "id": job_id,
-            "profile": request.profile.strip().lower(),
-            "model": (request.model or "").strip() or None,
-            "provider": (request.provider or "").strip() or None,
-            "reasoning_effort": request.reasoning_effort or "none",
-            "fast": bool(request.fast),
-            "request_id": request_id or None,
-            "status": "queued",
-            "created_at": int(time.time()),
-            "started_at": None,
-            "finished_at": None,
-            "session_id": request.session_id,
-            "response": None,
-            "error": None,
-            "kanban_task_id": kanban_task_id,
-            "kanban_board": KANBAN_BOARD if kanban_task_id else None,
-            "kanban_error": None,
-            "image_count": len(request.images),
-        }
+    job_id = row["job_id"]
+    with _JOBS_LOCK:
+        existing = _JOBS.get(job_id)
+        job = _memory_job_from_row(row, existing)
+        _JOBS[job_id] = job
         if request_key:
             _REQUEST_JOBS[request_key] = job_id
 
-    threading.Thread(target=_run_job, args=(job_id, request), name=f"agent-dock-{job_id[:8]}", daemon=True).start()
-    return _public_job(_JOBS[job_id])
+    if created:
+        threading.Thread(
+            target=_run_job,
+            args=(job_id, request),
+            name=f"agent-dock-{job_id[:8]}",
+            daemon=True,
+        ).start()
+    return _public_job(job)
 
 
 @router.get("/jobs/{job_id}")
@@ -1154,24 +1469,44 @@ async def get_job(job_id: str) -> dict[str, Any]:
         raise HTTPException(status_code=404, detail="Job not found")
     with _JOBS_LOCK:
         job = _JOBS.get(job_id)
-        if not job:
-            raise HTTPException(status_code=404, detail="Job not found")
-        return _public_job(job)
+    if not job:
+        job = _load_durable_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return _public_job(job)
 
 
 @router.delete("/jobs/{job_id}")
 async def cancel_job(job_id: str) -> dict[str, Any]:
+    store = _job_store()
     with _JOBS_LOCK:
         job = _JOBS.get(job_id)
-        if not job:
+    if not job:
+        job = _load_durable_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if job["status"] in {"done", "error", "cancelled", "interrupted", "finalizing"}:
+        return _public_job(job)
+
+    token = job.get("_attempt_token")
+    if not token or not store.request_cancel(job_id, token):
+        refreshed = _load_durable_job(job_id)
+        if refreshed is None:
             raise HTTPException(status_code=404, detail="Job not found")
-        if job["status"] in {"done", "error", "cancelled", "finalizing"}:
-            return _public_job(job)
-        process = job.get("_process")
-        job.update({"status": "cancelled", "finished_at": int(time.time()), "error": None})
+        return _public_job(refreshed)
+    with _JOBS_LOCK:
+        current = _JOBS.get(job_id) or job
+        process = current.get("_process")
+        current["status"] = "cancelling"
+        _JOBS[job_id] = current
     _terminate_process(process)
-    _settle_job_kanban(job_id, "cancelled", "Cancelled by Dad from Agent Dock")
-    return _public_job(job)
+    if store.complete_cancelled(job_id, token):
+        with _JOBS_LOCK:
+            current = _JOBS.get(job_id) or job
+            current.update({"status": "cancelled", "finished_at": int(time.time()), "error": None})
+            _JOBS[job_id] = current
+        _settle_job_kanban(job_id, "cancelled", "Cancelled by Dad from Agent Dock")
+    return _public_job(_load_durable_job(job_id) or current)
 
 
 def _achievement_snapshot() -> Path | None:

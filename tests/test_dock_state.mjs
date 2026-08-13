@@ -9,8 +9,10 @@ const exported = [
   'activeJobActivities',
   'activitySummary',
   'appendUniqueMessage',
+  'attachmentDisplayName',
   'buildJobPayload',
   'compactModelLabel',
+  'copyTextToClipboard',
   'dockModeAction',
   'dockPaneData',
   'extractClipboardImageFiles',
@@ -19,18 +21,23 @@ const exported = [
   'groupModelOptions',
   'interventionMethod',
   'interventionNeedsConfirmation',
+  'buildRebindPayload',
+  'exactRuntimeProfile',
   'liveSessionsForProfile',
+  'messageAttachmentMetadata',
   'migrateSavedModelSelections',
   'modelOptionKey',
   'modelPresentation',
   'nextDockMode',
   'normalizeDockMode',
   'normalizeInterventionKind',
+  'normalizeRuntimeProfile',
   'reasoningEffortForSliderPosition',
   'reasoningEffortSliderPosition',
   'profileActivityLabel',
   'profileDisplayLabel',
   'receiptLabel',
+  'rebindCandidateForRun',
   'reconcileIdempotentSubmission',
   'pruneExpiredStartingJobs',
   'removeProfileJob',
@@ -79,12 +86,49 @@ test('live attachment requires exact runtime-profile identity and excludes priva
     started_at: 10,
     last_active: 20
   }]
-  assert.deepEqual(state.liveSessionsForProfile(rows, 'jarvis', 'default'), [])
-  const projected = state.liveSessionsForProfile(rows, 'default', 'default')
+  const profiles = [{ name: 'default' }, { name: 'jarvis' }]
+  assert.deepEqual(state.liveSessionsForProfile(rows, 'jarvis', 'default', profiles), [])
+  assert.deepEqual(state.liveSessionsForProfile(rows, 'default', null, profiles), [])
+  assert.deepEqual(state.liveSessionsForProfile(rows, 'fabricated', 'fabricated', profiles), [])
+  const projected = state.liveSessionsForProfile(rows, 'default', 'default', profiles)
   assert.equal(projected.length, 1)
   assert.equal(projected[0].id, 'runtime-1')
   assert.equal(projected[0].session_key, '20260809_010203_live')
   assert.equal('preview' in projected[0], false)
+})
+
+test('runtime rebind requires exact profile and stable session identity', () => {
+  const profiles = [{ name: 'jarvis' }, { name: 'default' }]
+  const attached = {
+    run_id: 'run-1',
+    profile: 'jarvis',
+    session_id: 'stable-session-1',
+    runtime_profile: 'jarvis',
+    runtime_session_id: 'runtime-old'
+  }
+  const exact = { id: 'runtime-new', session_key: 'stable-session-1', title: 'New runtime' }
+  const wrongSession = { id: 'runtime-wrong', session_key: 'other-session', title: 'Same display title' }
+
+  assert.equal(state.normalizeRuntimeProfile(undefined), null)
+  assert.equal(state.exactRuntimeProfile('jarvis', null, profiles), null)
+  assert.equal(state.rebindCandidateForRun([wrongSession], attached, 'jarvis', 'jarvis', profiles), null)
+  assert.equal(state.rebindCandidateForRun([exact], attached, 'jarvis', 'default', profiles), null)
+  assert.equal(state.rebindCandidateForRun([exact], attached, 'jarvis', 'jarvis', profiles), exact)
+  assert.deepEqual(state.buildRebindPayload(attached, 'jarvis', 'jarvis', exact, profiles), {
+    profile: 'jarvis',
+    session_id: 'stable-session-1',
+    old_runtime_profile: 'jarvis',
+    old_runtime_session_id: 'runtime-old',
+    runtime_profile: 'jarvis',
+    runtime_session_id: 'runtime-new',
+    permission_scope: 'inherit-only'
+  })
+  assert.equal(state.buildRebindPayload(attached, 'jarvis', 'jarvis', wrongSession, profiles), null)
+  assert.match(pluginSource, /aria-label': 'Reattach live'/)
+  assert.match(pluginSource, /setBoundRuntimeSessionIds\(current => \(\{ \.\.\.current, \[attachedRun\.run_id\]: reboundRuntimeSessionId \}\)\)/)
+  assert.match(pluginSource, /const attachedRuntimeSessionId = boundRuntimeSessionIds\[attachedRunId\] \|\| attachedRun\?\.runtime_session_id \|\| ''/)
+  assert.match(pluginSource, /session_id: attachedControlRun\.runtime_session_id/)
+  assert.doesNotMatch(pluginSource, /useValue\(host\.state\.profile\) \|\| 'default'/)
 })
 
 test('ASK, NUDGE, and REDIRECT map to distinct native methods and truthful receipts', () => {
@@ -186,6 +230,48 @@ test('chat messages persist exact timestamps and format local date, time, second
   assert.match(label, /3:35:55 PM/)
   assert.match(label, /UTC/)
   assert.equal(state.formatMessageTimestamp(null, 'en-US', 'UTC'), 'Date unavailable')
+})
+
+test('message cards use a compact footer, expose assistant Copy, and show sent images as safe attachment chips', () => {
+  assert.match(pluginSource, /rounded-xl px-3 py-1\.5 text-\[0\.75rem\]/)
+  assert.match(pluginSource, /data-agent-dock-message-footer': 'true'/)
+  assert.match(pluginSource, /mt-0\.5 flex h-4 items-center gap-1/)
+  assert.match(pluginSource, /shrink-0 tabular-nums tracking-\[0\.04em\]/)
+  assert.match(pluginSource, /'aria-label': 'Copy assistant message'/)
+  assert.match(pluginSource, /'data-agent-dock-copy': 'true'/)
+  assert.match(pluginSource, /assistant\s*\n\s*\? jsx\('button'/)
+  assert.match(pluginSource, /Assistant message copied\./)
+  assert.match(pluginSource, /Could not copy assistant message\./)
+  assert.match(pluginSource, /Copy is unavailable in this Hermes surface\./)
+  assert.match(pluginSource, /data-agent-dock-attachment-row': 'true'/)
+  assert.match(pluginSource, /className: 'contents',\s*\n\s*role: 'list'/)
+  assert.match(pluginSource, /name: 'file-media'/)
+  assert.match(pluginSource, /attachmentDisplayName\(item\.name\)/)
+  assert.match(pluginSource, /children: `\$\{attachmentCount\} image\$\{attachmentCount === 1 \? '' : 's'\}`/)
+  assert.doesNotMatch(pluginSource, /children: `Images ·/)
+  assert.doesNotMatch(pluginSource, /children:\s*['"]Retry['"]/i)
+
+  const optimisticSegment = pluginSource.match(/const optimistic = \{[^]*?append\(profile, optimistic\)/)?.[0]
+  assert.ok(optimisticSegment, 'optimistic history append must remain present')
+  assert.match(optimisticSegment, /attachments: messageAttachmentMetadata\(images\)/)
+  assert.doesNotMatch(optimisticSegment, /data_url/)
+
+  assert.match(pluginSource, /message\.assignment \? 'You · Task assignment' : 'You'/)
+  assert.match(pluginSource, /message\.intervention \? message\.intervention\.toUpperCase\(\) : 'CONTROL'/)
+  assert.match(pluginSource, /children: timestamp/)
+})
+
+test('copy behavior is truthful and attachment history strips path-like names and private fields', async () => {
+  const copied = []
+  assert.equal(await state.copyTextToClipboard('answer', { writeText: async value => copied.push(value) }), 'copied')
+  assert.deepEqual(copied, ['answer'])
+  assert.equal(await state.copyTextToClipboard('answer', null), 'unavailable')
+  assert.equal(await state.copyTextToClipboard('answer', { writeText: async () => { throw new Error('denied') } }), 'failed')
+
+  assert.deepEqual(state.messageAttachmentMetadata([{
+    name: 'folder/private/proof.png', mime_type: 'image/png', size: 12,
+    data_url: 'data:image/png;base64,AAAA', path: 'folder/private/proof.png', private: 'omit'
+  }]), [{ name: 'proof.png', mime_type: 'image/png', size: 12 }])
 })
 
 test('idempotent submit retries once and non-idempotent submit never retries', async () => {

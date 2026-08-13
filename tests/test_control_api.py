@@ -92,6 +92,8 @@ class ControlApiTests(unittest.TestCase):
                 dispatcher_id="desktop:jarvis",
                 profile="jarvis",
                 session_id="20260809_210000_stable",
+                runtime_profile="jarvis",
+                runtime_session_id="runtime-session-1",
                 lease_seconds=30,
             ),
         )
@@ -105,6 +107,8 @@ class ControlApiTests(unittest.TestCase):
                 verification="observed",
                 profile="jarvis",
                 session_id="20260809_210000_stable",
+                runtime_profile="jarvis",
+                runtime_session_id="runtime-session-1",
                 dispatch_token=claimed["dispatch_token"],
                 detail={"method": "session.steer", "gateway_status": "accepted"},
             ),
@@ -116,6 +120,86 @@ class ControlApiTests(unittest.TestCase):
         self.assertEqual(selected["messages"][0]["state"], "accepted")
         self.assertEqual(selected["receipts"][0]["verification_state"], "observed")
         self.assertTrue(selected["events"])
+
+    def test_runtime_rebind_revokes_stale_claim_and_receipt_authority(self):
+        run = self.attach()
+        rebound = api.rebind_control_run(
+            run["run_id"],
+            api.RebindRunRequest(
+                profile="jarvis",
+                session_id="20260809_210000_stable",
+                old_runtime_profile="jarvis",
+                old_runtime_session_id="runtime-session-1",
+                runtime_profile="jarvis",
+                runtime_session_id="runtime-session-2",
+                permission_scope="inherit-only",
+            ),
+        )
+        self.assertEqual(rebound["runtime_session_id"], "runtime-session-2")
+        queued = api.enqueue_control_message(
+            api.ControlMessageRequest(
+                message_id="message-after-rebind",
+                run_id=run["run_id"],
+                profile="jarvis",
+                session_id="20260809_210000_stable",
+                kind="nudge",
+                body="Use only the new runtime.",
+            )
+        )
+        with self.assertRaises(HTTPException) as stale_claim:
+            api.claim_control_message(
+                queued["message_id"],
+                api.ClaimMessageRequest(
+                    dispatcher_id="desktop:jarvis",
+                    profile="jarvis",
+                    session_id="20260809_210000_stable",
+                    runtime_profile="jarvis",
+                    runtime_session_id="runtime-session-1",
+                ),
+            )
+        self.assertEqual(stale_claim.exception.status_code, 404)
+
+        claimed = api.claim_control_message(
+            queued["message_id"],
+            api.ClaimMessageRequest(
+                dispatcher_id="desktop:jarvis",
+                profile="jarvis",
+                session_id="20260809_210000_stable",
+                runtime_profile="jarvis",
+                runtime_session_id="runtime-session-2",
+            ),
+        )
+        stale_receipt = api.ReceiptRequest(
+            receipt_id="receipt-after-rebind-stale",
+            state="accepted",
+            source="hermes-gateway",
+            verification="observed",
+            profile="jarvis",
+            session_id="20260809_210000_stable",
+            runtime_profile="jarvis",
+            runtime_session_id="runtime-session-1",
+            dispatch_token=claimed["dispatch_token"],
+        )
+        with self.assertRaises(HTTPException) as rejected_receipt:
+            api.record_control_receipt(queued["message_id"], stale_receipt)
+        self.assertEqual(rejected_receipt.exception.status_code, 404)
+
+        accepted = api.record_control_receipt(
+            queued["message_id"],
+            stale_receipt.model_copy(
+                update={
+                    "receipt_id": "receipt-after-rebind-current",
+                    "runtime_session_id": "runtime-session-2",
+                }
+            ),
+        )
+        self.assertEqual(accepted["message_state"], "accepted")
+        selected = api.control_run(run["run_id"], "jarvis", "20260809_210000_stable")
+        self.assertEqual(selected["runtime_session_id"], "runtime-session-2")
+        self.assertEqual(
+            len([event for event in selected["events"] if event["kind"] == "run_rebound"]),
+            1,
+        )
 
     def test_redirect_confirmation_and_permission_monotonicity_are_enforced(self):
         run = self.attach()
@@ -170,6 +254,8 @@ class ControlApiTests(unittest.TestCase):
                 verification="observed",
                 profile="jarvis",
                 session_id="stable",
+                runtime_profile="jarvis",
+                runtime_session_id="runtime-session-1",
             )
         with self.assertRaises(HTTPException) as unknown:
             api.attach_control_run(
