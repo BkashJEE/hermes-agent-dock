@@ -1,4 +1,31 @@
-# Agent Dock current architecture
+# Hermes Agent Dock current architecture
+
+## Integrated v0.4 boundaries
+
+The Dock is a compact 380 px operations surface, not a second orchestrator.
+Hermes remains authoritative for execution and delegated-child lifecycle. The
+backend extends the existing tool-progress callback into a bounded,
+profile-local JSONL channel and validates each record again before the UI sees
+it.
+
+Public child state is limited to generated child identity, task index,
+lifecycle status/timestamps, a finite current-tool label, model, API-call count,
+reported input/output/total tokens, usage state, and a false direct-chat
+capability. Prompts, goals, summaries, reasoning, tool arguments/results,
+commands, credentials, private paths, stderr, and transcripts never cross this
+boundary.
+
+Child expansion is local React state and performs no model call. Direct child
+conversation remains unavailable because the subprocess runner does not own the
+exact in-process gateway transport/session generation required by Hermes's
+`subagent.steer` authority check. A child/session identifier alone is not a
+capability.
+
+The profile-local job ledger preserves job/profile/attempt identity across
+restart. Startup reconciliation moves uncertain active work to terminal
+interrupted or cancelled state and never relaunches it. Runtime attachment is
+separate and explicit; stale runtime generations cannot claim or receipt control
+messages.
 
 > **Historical baseline — not current acceptance authority.** This file captures the pre-control-plane architecture. Agent Dock v0.3.0 subsequently added the durable SQLite control store, exact run/runtime bindings, queued interventions, leases, receipts, and privacy-reduced events. Use `PRODUCT_SPEC.md`, `backend/dashboard/control_store.py`, and `docs/agent-chat-dock/v0.4-limitations-roadmap.md` for current behavior and active work.
 

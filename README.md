@@ -100,6 +100,14 @@ The selected profile keeps its existing tools, memory, model/provider configurat
 - Creates a real card on the `executive-organization` Hermes Kanban board only when **Assign task** is active; ordinary chat never creates a card.
 - Keeps the linked card synchronized with the Dock job and settles captured responses as `blocked / needs_input` for Dad/CEO verification rather than falsely declaring the task complete.
 - Optionally plays a deduplicated achievement unlock chime; first load establishes a silent baseline and a persistent mute control is available.
+- Shows a compact **Subagents (N)** tree only after Hermes emits an authoritative
+  start event for the exact parent job. Child rows expose bounded lifecycle
+  state, a safe current-tool label, model/API calls, and reported input/output
+  token totals when Hermes supplies them.
+- Reconciles profile-local durable job reservations after restart without
+  relaunching uncertain work, and requires explicit exact-runtime reattachment.
+- Uses compact attachment chips and assistant-only Copy; history retains neither
+  image bytes nor private source paths, and the Dock intentionally has no Retry.
 
 ## Important boundaries
 
@@ -116,6 +124,13 @@ The selected profile keeps its existing tools, memory, model/provider configurat
 - Pending image bytes remain only in renderer memory until submission. History stores attachment names/metadata, never base64 payloads, and the backend deletes each job's temporary image directory in `finally`.
 - Explicit assignment requires the local `executive-organization` Kanban board and a valid `request_id`. The card records the accountable profile, stable Dock job identity, and idempotency key. Request retries reuse the existing job/card during the bounded retention window; terminal jobs are retained for up to one hour, subject to a 200-job cap, while active jobs are never evicted.
 - Achievement integration is optional. It reads the local `hermes-achievements/scan_snapshot.json` and intentionally omits evidence, session IDs, and session titles.
+- Subagent prompts, goals, summaries, reasoning, tool arguments/results,
+  commands, credentials, private paths, stderr, and transcripts never enter the
+  public child projection. Missing token usage is **Unavailable**, not zero.
+- The subprocess runner does not possess Hermes's exact in-process gateway
+  transport authority for a live child. Child rows therefore show **Direct chat
+  unavailable**; Agent Dock never routes a child message through the parent or
+  spawns a replacement child while pretending it is the original.
 
 ## Requirements
 
