@@ -25,6 +25,7 @@ import {
   SelectItem,
   SelectTrigger,
   SelectValue,
+  Switch,
   Textarea,
   useQuery,
   useValue
@@ -673,6 +674,91 @@ function readImageAsDataUrl(file) {
   })
 }
 
+// ── Bot-Mode port: routines + profile actions (pure logic, no host/React) ──
+// Ported from NousResearch/Hermes-Bot-Mode (MIT) — scheduleLabel, routineTitle,
+// isLegacyDelegatedRoutine, duplicateName, routineActive.
+
+const DOCK_ROUTINE_TAG_RE = /^\[bot:([a-z0-9][a-z0-9_-]*)\]\s*/i
+const LEGACY_DELEGATED_ROUTINE_PREFIX = 'You are running the scheduled routine "'
+
+function routineBot(job) {
+  const match = DOCK_ROUTINE_TAG_RE.exec(job?.name || '')
+  return match ? match[1].toLowerCase() : null
+}
+
+function routineTitle(job) {
+  return (job?.name || '').replace(DOCK_ROUTINE_TAG_RE, '') || 'Untitled routine'
+}
+
+function isLegacyDelegatedRoutine(job) {
+  const preview = typeof job?.prompt_preview === 'string' ? job.prompt_preview : job?.prompt
+  return Boolean(routineBot(job) && typeof preview === 'string' && preview.startsWith(LEGACY_DELEGATED_ROUTINE_PREFIX))
+}
+
+/** Human label for a Hermes schedule string. Ported from Bot-Mode scheduleLabel. */
+function scheduleLabel(schedule) {
+  const once = /^once in (.+)$/.exec(schedule || '')
+  if (once) return `Once (${once[1]})`
+  const bare = /^(\d+)([mhd])$/.exec(schedule || '')
+  if (bare) return `Once (${bare[1]}${bare[2]})`
+  const match = /^every (\d+)m$/.exec(schedule || '')
+  if (match) {
+    const minutes = Number(match[1])
+    if (minutes % 1440 === 0) {
+      const d = minutes / 1440
+      return d === 1 ? 'Daily' : `Every ${d} days`
+    }
+    if (minutes % 60 === 0) {
+      const h = minutes / 60
+      return h === 1 ? 'Hourly' : `Every ${h}h`
+    }
+    return `Every ${minutes}m`
+  }
+  return schedule || ''
+}
+
+/** True when the cronjob is live (not paused/disabled, not a legacy unsafe one). */
+function routineActive(job) {
+  if (isLegacyDelegatedRoutine(job)) return false
+  return job.enabled !== false && job.state !== 'paused'
+}
+
+/** Filter a cron list down to jobs belonging to one profile (by [bot:x] tag). */
+function selectRoutineJobs(jobs, profile) {
+  const all = Array.isArray(jobs) ? jobs : []
+  if (!profile) return all
+  const want = String(profile).trim().toLowerCase()
+  return all.filter(job => (routineBot(job) || 'default') === want)
+}
+
+/**
+ * Next free "<base>-N" name not colliding with taken names. Truncates the BASE,
+ * never the suffix (Bot-Mode #19: slicing the joined string chops "-2" off a
+ * max-length name and the candidate collides with the base forever).
+ */
+function duplicateName(base, taken, maxLen = 64) {
+  const baseName = String(base || '').trim()
+  const have = new Set(Array.isArray(taken) ? taken : [])
+  for (let n = 2; n < 100; n++) {
+    const suffix = `-${n}`
+    const candidate = baseName.slice(0, Math.max(0, maxLen - suffix.length)) + suffix
+    if (!have.has(candidate)) return candidate
+  }
+  return null
+}
+
+function relativeRoutineTime(iso) {
+  const t = new Date(iso || 0).getTime()
+  if (!Number.isFinite(t) || t <= 0) return ''
+  const diff = t - Date.now()
+  if (diff <= 0) return 'due now'
+  const min = Math.round(diff / 60000)
+  if (min < 60) return `next in ${min}m`
+  const h = Math.round(min / 60)
+  if (h < 24) return `next in ${h}h`
+  return `next in ${Math.round(h / 24)}d`
+}
+
 function HermesMark({ compact = false }) {
   return jsx('span', {
     'aria-hidden': true,
@@ -1067,6 +1153,66 @@ function SolvingWorkingOrb({ label = 'Agent working' }) {
     ref: canvasRef,
     role: 'img',
     style: { height: 20, width: 20 }
+  })
+}
+
+// ── Bot-Mode port: Routines row UI ──────────────────────────────────────────
+
+function RoutineRow({ job, busy, onAction }) {
+  const active = routineActive(job)
+  const legacyUnsafe = isLegacyDelegatedRoutine(job)
+  return jsxs('div', {
+    className: 'grid gap-1 rounded-lg border border-(--ui-stroke-secondary) p-2',
+    children: [
+      jsxs('div', {
+        className: 'flex items-center gap-2',
+        children: [
+          jsx('span', {
+            'aria-hidden': true,
+            className: cn('size-1.5 shrink-0 rounded-full', active ? 'bg-emerald-500' : 'bg-(--ui-text-quaternary)')
+          }),
+          jsx('span', {
+            className: cn('min-w-0 flex-1 truncate text-xs font-medium', !active && 'text-(--ui-text-tertiary)'),
+            children: routineTitle(job)
+          }),
+          jsx(Switch, {
+            checked: active,
+            disabled: busy || legacyUnsafe,
+            onCheckedChange: value => onAction(job, value ? 'resume' : 'pause')
+          }),
+          jsx('button', {
+            type: 'button',
+            disabled: busy || legacyUnsafe,
+            'aria-label': 'Delete routine',
+            className: 'flex size-5 shrink-0 items-center justify-center rounded text-(--ui-text-quaternary) hover:bg-(--chrome-action-hover) hover:text-foreground',
+            onClick: () => onAction(job, 'remove'),
+            children: jsx(Codicon, { name: 'trash', className: 'text-[0.72rem]' })
+          })
+        ]
+      }),
+      jsxs('div', {
+        className: 'flex items-center justify-between gap-2 pl-3.5',
+        children: [
+          jsxs('span', {
+            className: 'inline-flex items-center gap-1 rounded-full border border-(--ui-stroke-secondary) px-1.5 py-0.5 text-[0.62rem] text-(--ui-text-tertiary)',
+            children: [
+              jsx(Codicon, { name: 'calendar', className: 'text-[0.66rem]' }),
+              scheduleLabel(job.schedule)
+            ]
+          }),
+          jsx('span', {
+            className: 'truncate text-[0.62rem] text-(--ui-text-quaternary)',
+            children: active && job.next_run_at ? relativeRoutineTime(job.next_run_at) : 'paused'
+          })
+        ]
+      }),
+      legacyUnsafe
+        ? jsx('div', {
+            className: 'rounded-md border border-(--ui-stroke-secondary) px-2 py-1.5 text-[0.62rem] leading-4 text-(--ui-accent)',
+            children: 'Paused for security: delete and recreate this legacy routine before running it again.'
+          })
+        : null
+    ]
   })
 }
 
@@ -2217,6 +2363,74 @@ function AgentDock({ mode = DEFAULT_DOCK_MODE, onToggleMode }) {
     haptic('tap')
   }
 
+  // ── Bot-Mode port: routines (cron jobs) + profile duplicate/SOUL ──
+  const routinesQuery = useQuery({
+    queryKey: [ID, 'routines', currentName],
+    queryFn: () => host.request('cron.manage', { action: 'list', include_disabled: true }),
+    refetchInterval: 20_000,
+    staleTime: 8_000,
+    enabled: Boolean(currentName)
+  })
+  const routineJobs = useMemo(
+    () => selectRoutineJobs(routinesQuery.data?.jobs, currentName),
+    [routinesQuery.data, currentName]
+  )
+  const [routineBusy, setRoutineBusy] = useState(false)
+  const [soulOpen, setSoulOpen] = useState(false)
+  const [soulText, setSoulText] = useState('')
+  const [soulLoading, setSoulLoading] = useState(false)
+  const [dupBusy, setDupBusy] = useState(false)
+
+  const actRoutine = async (job, action) => {
+    if (routineBusy) return
+    setRoutineBusy(true)
+    try {
+      await host.request('cron.manage', { action, name: job.job_id })
+      routinesQuery.refetch()
+      if (action === 'remove') host.notify({ kind: 'success', message: `Routine removed: ${routineTitle(job)}` })
+    } catch (err) {
+      host.notify({ kind: 'error', message: `Routine update failed: ${err}` })
+    } finally {
+      setRoutineBusy(false)
+    }
+  }
+
+  const openSoul = async () => {
+    setSoulOpen(true)
+    if (soulText) return
+    setSoulLoading(true)
+    try {
+      const res = await host.request('profiles.describe', { name: currentName })
+      setSoulText(typeof res?.soul === 'string' && res.soul ? res.soul : '(no SOUL.md for this profile)')
+    } catch (err) {
+      setSoulText(`Could not load SOUL.md: ${err}`)
+    } finally {
+      setSoulLoading(false)
+    }
+  }
+
+  const duplicateCurrent = async () => {
+    if (dupBusy) return
+    const base = currentName
+    const taken = profiles.map(p => p.name)
+    const candidate = duplicateName(base, taken)
+    if (!candidate) {
+      host.notify({ kind: 'error', message: 'No free name available for the duplicate.' })
+      return
+    }
+    setDupBusy(true)
+    try {
+      await host.request('profiles.create', { name: candidate, clone_from: base })
+      host.notify({ kind: 'success', message: `Profile duplicated: ${candidate} (clones ${base})` })
+      profilesQuery.refetch()
+    } catch (err) {
+      host.notify({ kind: 'error', message: `Duplicate failed: ${err}` })
+    } finally {
+      setDupBusy(false)
+    }
+  }
+
+
   const rememberAttachedRun = (profile, runId) => {
     setAttachedRunIds(current => {
       const next = { ...current }
@@ -2986,6 +3200,83 @@ function AgentDock({ mode = DEFAULT_DOCK_MODE, onToggleMode }) {
                     modelsQuery.isError
                       ? jsx('p', { className: 'text-[0.62rem] text-(--ui-danger)', children: 'The configured profile model could not be loaded.' })
                       : null,
+                    routinesQuery.isError
+                      ? jsx('p', { className: 'text-[0.62rem] text-(--ui-text-tertiary)', children: 'Routines unavailable on this gateway build.' })
+                      : routineJobs.length
+                        ? jsxs('div', {
+                            className: 'space-y-1.5',
+                            children: [
+                              jsxs('div', {
+                                className: 'flex items-center gap-1.5 text-[0.6rem] font-medium uppercase tracking-[0.1em] text-(--ui-text-tertiary)',
+                                children: [
+                                  jsx(Codicon, { name: 'clock', size: '0.72rem' }),
+                                  jsx('span', { children: `Routines (${routineJobs.length})` })
+                                ]
+                              }),
+                              ...routineJobs.map(job =>
+                                jsx(RoutineRow, {
+                                  busy: routineBusy,
+                                  job: job,
+                                  onAction: actRoutine
+                                }, job.job_id)
+                              )
+                            ]
+                          })
+                        : null,
+                    jsxs('div', {
+                      className: 'flex items-center gap-1.5',
+                      children: [
+                        jsx('button', {
+                          type: 'button',
+                          disabled: dupBusy,
+                          title: `Duplicate ${currentName} (clones profile, SOUL and skills)`,
+                          className: 'flex h-7 min-w-0 flex-1 items-center justify-center gap-1.5 rounded-md border border-(--ui-stroke-secondary) bg-(--ui-control-hover-background) px-2 text-[0.66rem] text-(--ui-text-secondary) hover:text-foreground disabled:opacity-50',
+                          onClick: duplicateCurrent,
+                          children: [
+                            jsx(Codicon, { name: 'copy', size: '0.72rem' }),
+                            jsx('span', { children: dupBusy ? 'Duplicating…' : 'Duplicate profile' })
+                          ]
+                        }),
+                        jsx('button', {
+                          type: 'button',
+                          title: 'View this profile SOUL.md',
+                          className: 'flex h-7 min-w-0 items-center justify-center gap-1.5 rounded-md border border-(--ui-stroke-secondary) bg-(--ui-control-hover-background) px-2 text-[0.66rem] text-(--ui-text-secondary) hover:text-foreground',
+                          onClick: openSoul,
+                          children: [
+                            jsx(Codicon, { name: 'book', size: '0.72rem' }),
+                            jsx('span', { children: 'SOUL' })
+                          ]
+                        }),
+                        soulOpen
+                          ? jsx('button', {
+                              type: 'button',
+                              title: 'Close SOUL.md viewer',
+                              className: 'flex h-7 items-center justify-center rounded-md border border-(--ui-stroke-secondary) px-2 text-(--ui-text-tertiary) hover:text-foreground',
+                              onClick: () => { setSoulOpen(false); setSoulText('') },
+                              children: jsx(Codicon, { name: 'close', size: '0.72rem' })
+                            })
+                          : null
+                      ]
+                    }),
+                    soulOpen
+                      ? jsxs('div', {
+                          className: 'rounded-md border border-(--ui-stroke-secondary) bg-(--ui-bg-secondary)',
+                          children: [
+                            jsxs('div', {
+                              className: 'flex items-center gap-1.5 border-b border-(--ui-stroke-secondary) px-2 py-1 text-[0.62rem] font-medium text-(--ui-text-secondary)',
+                              children: [
+                                jsx(Codicon, { name: 'book', size: '0.68rem' }),
+                                jsx('span', { children: `SOUL.md · ${currentName}` })
+                              ]
+                            }),
+                            jsx('pre', {
+                              className: 'max-h-40 overflow-auto whitespace-pre-wrap break-words px-2 py-1.5 font-mono text-[0.6rem] leading-4 text-(--ui-text-secondary)',
+                              children: soulLoading ? 'Loading…' : soulText
+                            })
+                          ]
+                        })
+                      : null,
+
                     visibleSubagents.length
                       ? jsxs('div', {
                           className: 'rounded-md border border-(--ui-stroke-secondary) bg-(--ui-control-hover-background)',
