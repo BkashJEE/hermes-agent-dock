@@ -1180,22 +1180,650 @@ function MessageBubble({ message }) {
   })
 }
 
+// ---- Bot-Mode avatar core (ported from NousResearch/Hermes-Bot-Mode, MIT) ----
+const AVATAR_SHAPES = ['circle', 'squircle', 'pill', 'triangle', 'hexagon', 'cloud', 'drop']
+const AVATAR_PICKER_SHAPES = ['circle', 'blob', 'squircle', 'pill', 'triangle', 'hexagon', 'cloud', 'drop']
+
+/** xorshift PRNG seeded from a string — stable across sessions/platforms. */
+function sigilRng(text) {
+  let h = 2166136261
+  for (const ch of text) {
+    h ^= ch.charCodeAt(0)
+    h = Math.imul(h, 16777619)
+  }
+  let state = h >>> 0 || 88675123
+  return () => {
+    state ^= state << 13
+    state ^= state >>> 17
+    state ^= state << 5
+    state >>>= 0
+    return state / 4294967296
+  }
+}
+
+/**
+ * Angular hermetic sigil: strokes on the left half of a 5-column grid,
+ * mirrored right, plus a chance of a diamond ring. Returns SVG path strings.
+ */
+function sigilGeometry(name, seed) {
+  const rng = sigilRng(`${name}::${seed}`)
+  const gx = i => 6 + i * 7 // 5 cols: 6..34
+  const gy = j => 8 + j * 6 // 5 rows: 8..32
+  const strokes = []
+  const segments = 4 + Math.floor(rng() * 3)
+
+  for (let k = 0; k < segments; k++) {
+    const x1 = Math.floor(rng() * 3) // left half incl. center
+    const y1 = Math.floor(rng() * 5)
+    const x2 = Math.min(2, Math.max(0, x1 + (rng() > 0.5 ? 1 : -1)))
+    const y2 = Math.min(4, Math.max(0, y1 + Math.floor(rng() * 3) - 1))
+
+    strokes.push(`M${gx(x1)} ${gy(y1)} L${gx(x2)} ${gy(y2)}`)
+    // mirror (col i → col 4-i)
+    strokes.push(`M${gx(4 - x1)} ${gy(y1)} L${gx(4 - x2)} ${gy(y2)}`)
+
+    // occasional cross-tie through the axis for connectedness
+    if (rng() > 0.6) {
+      strokes.push(`M${gx(x2)} ${gy(y2)} L${gx(4 - x2)} ${gy(y2)}`)
+    }
+  }
+
+  // spine down the axis grounds every variant
+  strokes.push(`M20 ${gy(0)} L20 ${gy(4)}`)
+
+  const ring = rng() > 0.45 ? 'M20 4 L36 20 L20 36 L4 20 Z' : null
+  return { strokes: strokes.join(' '), ring }
+}
+
+const AVATAR_COLORS = [
+  '#f5f5f4', // white
+  '#8d6748', // brown
+  '#ef4444', // red
+  '#f97316', // orange
+  '#14b8a6', // teal
+  '#38bdf8', // cyan
+  '#3b40c8', // royal blue
+  '#8b5cf6', // violet
+  '#ec4899', // magenta
+  '#9ca3af' // silver
+]
+
+/** Perceptual luminance — eyes/pupils flip light on dark bodies (ink, oxblood). */
+function isDarkColor(hex) {
+  try {
+    const n = parseInt(hex.slice(1), 16)
+    const r = (n >> 16) & 255
+    const g = (n >> 8) & 255
+    const b = n & 255
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b < 110
+  } catch {
+    return false
+  }
+}
+
+function defaultShapeFor(name) {
+  let hash = 0
+  for (const ch of name) {
+    hash = (hash * 31 + ch.charCodeAt(0)) >>> 0
+  }
+  return AVATAR_SHAPES[hash % AVATAR_SHAPES.length]
+}
+
+/** The colored body of the avatar (no eyes). Platonic solids are a filled
+ *  silhouette + translucent internal edge lines (the projected wireframe);
+ *  legacy flat shapes keep their old geometry so stored picks still render. */
+function shapeNode(shape, color, botName = 'agent') {
+  if (shape.startsWith('sigil-')) {
+    const seed = Number(shape.slice(6)) || 0
+    const { strokes, ring } = sigilGeometry(botName, seed)
+    const sw = { fill: 'none', stroke: color, strokeWidth: 2.2, strokeLinecap: 'round', strokeLinejoin: 'round' }
+    return jsxs('g', {
+      children: [
+        ring ? jsx('path', { d: ring, fill: 'none', stroke: color, strokeWidth: 1.2, opacity: 0.5 }) : null,
+        jsx('path', { d: strokes, ...sw })
+      ]
+    })
+  }
+
+  const stroke = { fill: color, stroke: color, strokeWidth: 7, strokeLinejoin: 'round' }
+  const edge = { fill: 'none', stroke: 'rgba(0,0,0,0.4)', strokeWidth: 1.4, strokeLinejoin: 'round', strokeLinecap: 'round' }
+  const face = { fill: color, stroke: 'rgba(0,0,0,0.4)', strokeWidth: 1.4, strokeLinejoin: 'round' }
+
+  switch (shape) {
+    // ── platonic solids ──
+    case 'tetrahedron':
+      return jsxs('g', {
+        children: [
+          jsx('path', { d: 'M20 5 L36 33 L4 33 Z', ...face }),
+          jsx('path', { d: 'M20 5 L20 25 M4 33 L20 25 M36 33 L20 25', ...edge })
+        ]
+      })
+    case 'cube':
+      return jsxs('g', {
+        children: [
+          jsx('path', { d: 'M20 4 L33 11 L33 29 L20 36 L7 29 L7 11 Z', ...face }),
+          jsx('path', { d: 'M7 11 L20 18 L33 11 M20 18 L20 36', ...edge })
+        ]
+      })
+    case 'octahedron':
+      return jsxs('g', {
+        children: [
+          jsx('path', { d: 'M20 3 L36 20 L20 37 L4 20 Z', ...face }),
+          jsx('path', { d: 'M4 20 L36 20 M20 3 L20 37', ...edge })
+        ]
+      })
+    case 'dodecahedron':
+      return jsxs('g', {
+        children: [
+          jsx('path', {
+            d: 'M20 3 L30 6.2 L36.2 14.7 L36.2 25.3 L30 33.8 L20 37 L10 33.8 L3.8 25.3 L3.8 14.7 L10 6.2 Z',
+            ...face
+          }),
+          jsx('path', {
+            d:
+              'M20 12 L27.6 17.5 L24.7 26.5 L15.3 26.5 L12.4 17.5 Z ' +
+              'M20 12 L20 3 M27.6 17.5 L36.2 14.7 M24.7 26.5 L30 33.8 M15.3 26.5 L10 33.8 M12.4 17.5 L3.8 14.7',
+            ...edge
+          })
+        ]
+      })
+    case 'icosahedron':
+      return jsxs('g', {
+        children: [
+          jsx('path', { d: 'M20 3 L34.7 11.5 L34.7 28.5 L20 37 L5.3 28.5 L5.3 11.5 Z', ...face }),
+          jsx('path', {
+            d:
+              'M20 11 L27.8 24.5 L12.2 24.5 Z ' +
+              'M20 11 L20 3 M20 11 L34.7 11.5 M20 11 L5.3 11.5 ' +
+              'M27.8 24.5 L34.7 11.5 M27.8 24.5 L34.7 28.5 M27.8 24.5 L20 37 ' +
+              'M12.2 24.5 L5.3 11.5 M12.2 24.5 L5.3 28.5 M12.2 24.5 L20 37',
+            ...edge
+          })
+        ]
+      })
+
+    // ── legacy flat shapes (stored picks from earlier versions) ──
+    case 'squircle':
+      return jsx('rect', { x: 3, y: 3, width: 34, height: 34, rx: 11, fill: color })
+    case 'pill':
+      return jsx('rect', { x: 2, y: 7, width: 36, height: 26, rx: 13, fill: color })
+    case 'triangle':
+      return jsx('path', { d: 'M20 5.5 L36 33.5 L4 33.5 Z', ...stroke })
+    case 'hexagon':
+      return jsx('path', { d: 'M20 3.5 L34.5 11.75 L34.5 28.25 L20 36.5 L5.5 28.25 L5.5 11.75 Z', ...stroke })
+    case 'cloud':
+      return jsx('path', {
+        d: 'M11 32 a7.5 7.5 0 0 1 -1 -14.9 A9.5 9.5 0 0 1 29 12.5 A7 7 0 0 1 30 32 Z',
+        fill: color
+      })
+    case 'drop':
+      return jsx('path', { d: 'M20 3 C20 3 6 20 6 27 a14 13.5 0 0 0 28 0 C34 20 20 3 20 3 Z', fill: color })
+    default:
+      return jsx('circle', { cx: 20, cy: 20, r: 17.5, fill: color })
+  }
+}
+
+const EYE_Y = {
+  // solids: eyes sit on the upper face region, clear of the busiest edges
+  tetrahedron: 26,
+  cube: 22.5,
+  octahedron: 14.5,
+  dodecahedron: 20,
+  icosahedron: 17.5,
+  // legacy
+  circle: 17,
+  squircle: 17,
+  pill: 20,
+  triangle: 25,
+  hexagon: 17,
+  cloud: 22,
+  drop: 24
+}
+
+// Solids draw eyes slightly tighter so they read as ON a face.
+const EYE_X = {
+  tetrahedron: [16.5, 23.5],
+  cube: [15, 25],
+  octahedron: [16, 24],
+  dodecahedron: [16.5, 23.5],
+  icosahedron: [16.5, 23.5]
+}
+
+function cubicAt(p0, p1, p2, p3, t) {
+  const u = 1 - t
+  return [
+    u * u * u * p0[0] + 3 * u * u * t * p1[0] + 3 * u * t * t * p2[0] + t * t * t * p3[0],
+    u * u * u * p0[1] + 3 * u * u * t * p1[1] + 3 * u * t * t * p2[1] + t * t * t * p3[1]
+  ]
+}
+
+/** Same outline as the old GitHub drop path, so it stays a fat water drop. */
+function sampleDropRing(steps) {
+  const pts = []
+  const n = Math.max(8, Math.floor(steps / 3))
+
+  for (let i = 0; i < n; i++) {
+    pts.push(cubicAt([20, 3], [20, 3], [6, 20], [6, 27], i / n))
+  }
+
+  for (let i = 0; i <= n; i++) {
+    const t = (i / n) * Math.PI
+    pts.push([20 - 14 * Math.cos(t), 27 + 13.5 * Math.sin(t)])
+  }
+
+  for (let i = 1; i <= n; i++) {
+    pts.push(cubicAt([34, 27], [34, 20], [20, 3], [20, 3], i / n))
+  }
+
+  return pts
+}
+
+function svgArc(x1, y1, rx, ry, fa, fs, x2, y2) {
+  const dx = (x1 - x2) / 2
+  const dy = (y1 - y2) / 2
+  let rx2 = rx * rx
+  let ry2 = ry * ry
+  const lam = (dx * dx) / rx2 + (dy * dy) / ry2
+  if (lam > 1) {
+    const s = Math.sqrt(lam)
+    rx *= s
+    ry *= s
+    rx2 = rx * rx
+    ry2 = ry * ry
+  }
+  const num = rx2 * ry2 - rx2 * dy * dy - ry2 * dx * dx
+  const den = rx2 * dy * dy + ry2 * dx * dx
+  let sq = Math.sqrt(Math.max(0, num / den))
+  if (fa === fs) {
+    sq = -sq
+  }
+  const cx = sq * (rx * dy / ry) + (x1 + x2) / 2
+  const cy = sq * (-ry * dx / rx) + (y1 + y2) / 2
+  const ang = (ux, uy, vx, vy) => {
+    const n = Math.hypot(ux, uy) * Math.hypot(vx, vy) || 1
+    let a = Math.acos(Math.max(-1, Math.min(1, (ux * vx + uy * vy) / n)))
+    if (ux * vy - uy * vx < 0) {
+      a = -a
+    }
+    return a
+  }
+  const theta1 = ang(1, 0, (x1 - cx) / rx, (y1 - cy) / ry)
+  let dtheta = ang((x1 - cx) / rx, (y1 - cy) / ry, (x2 - cx) / rx, (y2 - cy) / ry)
+  if (!fs && dtheta > 0) {
+    dtheta -= Math.PI * 2
+  }
+  if (fs && dtheta < 0) {
+    dtheta += Math.PI * 2
+  }
+  return { cx, cy, rx, ry, theta1, dtheta }
+}
+
+function sampleArc(arc, n) {
+  const pts = []
+  for (let i = 0; i < n; i++) {
+    const th = arc.theta1 + arc.dtheta * (i / n)
+    pts.push([arc.cx + arc.rx * Math.cos(th), arc.cy + arc.ry * Math.sin(th)])
+  }
+  return pts
+}
+
+/** Same outline as the old GitHub cloud path: three puffs and a flat floor. */
+function sampleCloudRing(steps) {
+  const a1 = svgArc(11, 32, 7.5, 7.5, 0, 1, 10, 17.1)
+  const a2 = svgArc(10, 17.1, 9.5, 9.5, 0, 1, 29, 12.5)
+  const a3 = svgArc(29, 12.5, 7, 7, 0, 1, 30, 32)
+  const len1 = Math.abs(a1.dtheta) * a1.rx
+  const len2 = Math.abs(a2.dtheta) * a2.rx
+  const len3 = Math.abs(a3.dtheta) * a3.rx
+  const len4 = 19
+  const total = len1 + len2 + len3 + len4
+  const n = Math.max(64, steps)
+  const n1 = Math.max(8, Math.round(n * len1 / total))
+  const n2 = Math.max(10, Math.round(n * len2 / total))
+  const n3 = Math.max(10, Math.round(n * len3 / total))
+  const n4 = Math.max(4, n - n1 - n2 - n3)
+  const pts = []
+  pts.push(...sampleArc(a1, n1))
+  pts.push(...sampleArc(a2, n2))
+  pts.push(...sampleArc(a3, n3))
+  for (let i = 0; i < n4; i++) {
+    pts.push([30 + (11 - 30) * (i / n4), 32])
+  }
+  return pts
+}
+
+/** Outline of a face in a 40x40 box. Same family as Grok Bot
+ *  (blob / squircle / pebble / \u2026) but sampled from formulas, not
+ *  a dumped point cloud. */
+function sampleFaceRing(shape, steps = 52) {
+  const kind = (shape || '').startsWith('sigil-') ? 'circle' : shape
+
+  if (kind === 'drop' || kind === 'teardrop') {
+    return sampleDropRing(steps)
+  }
+  if (kind === 'cloud') {
+    return sampleCloudRing(steps)
+  }
+  const pts = []
+
+  for (let i = 0; i < steps; i++) {
+    const a = (i / steps) * Math.PI * 2 - Math.PI / 2
+    const c = Math.cos(a)
+    const s = Math.sin(a)
+    let rx = 16
+    let ry = 16
+    if (kind === 'circle') {
+      rx = ry = 16.2
+    } else if (kind === 'blob') {
+      rx = ry = 16 + 1.7 * Math.sin(3 * a) + 0.7 * Math.cos(5 * a)
+    } else if (kind === 'squircle') {
+      const p = 5
+      const d = Math.pow(Math.abs(c) ** p + Math.abs(s) ** p, 1 / p) || 1
+      rx = ry = 16.2 / d
+    } else if (kind === 'pill') {
+      const d = Math.pow(Math.abs(c) ** 8 + Math.abs(s / 0.72) ** 8, 1 / 8) || 1
+      rx = ry = 16 / d
+    } else if (kind === 'triangle' || kind === 'tetrahedron' || kind === 'wedge') {
+      const u = (a + Math.PI / 2 + Math.PI * 2) % (Math.PI * 2)
+      const sector = (u / (Math.PI * 2 / 3)) % 1
+      rx = ry = 13.5 / Math.max(0.42, Math.cos((sector - 0.5) * 1.9))
+    } else if (kind === 'hexagon' || kind === 'hex' || kind === 'icosahedron' || kind === 'dodecahedron') {
+      const seg = Math.PI / 3
+      const hex = Math.cos(seg / 2) / Math.cos(a - seg * Math.round(a / seg))
+      rx = ry = 16.2 * hex
+    } else if (kind === 'cube' || kind === 'octahedron') {
+      const p = 3.1
+      const d = Math.pow(Math.abs(c) ** p + Math.abs(s) ** p, 1 / p) || 1
+      rx = ry = 16 / d
+    } else if (kind === 'pebble') {
+      rx = 16.4 * (1.04 - 0.14 * Math.cos(2 * a))
+      ry = 15.2 * (1.06 + 0.08 * Math.sin(2 * a))
+    } else {
+      rx = ry = 16.2
+    }
+
+    pts.push([20 + rx * c, 20 + ry * s])
+  }
+
+  return pts
+}
+
+function projectFacePoint(x, y, turn, tilt, roll) {
+  const dx = x - 20
+  const dy = y - 20
+  const r = (roll * Math.PI) / 180
+  const xr = dx * Math.cos(r) - dy * Math.sin(r)
+  const yr = dx * Math.sin(r) + dy * Math.cos(r)
+  const sx = 0.74 + 0.26 * Math.abs(Math.cos((turn * Math.PI) / 180))
+  const sy = 0.8 + 0.2 * Math.abs(Math.cos((tilt * Math.PI) / 180))
+  return [20 + xr * sx, 20 + yr * sy]
+}
+
+function ringToPath(pts) {
+  if (!pts.length) {
+    return ''
+  }
+
+  let d = `M${pts[0][0].toFixed(2)} ${pts[0][1].toFixed(2)}`
+
+  for (let i = 1; i < pts.length; i++) {
+    d += `L${pts[i][0].toFixed(2)} ${pts[i][1].toFixed(2)}`
+  }
+
+  return d + 'Z'
+}
+
+/** Grok-style pose. thinking/working lean and sway. idle is a small sine. */
+function facePose(mood, t) {
+  if (mood === 'work') {
+    return {
+      turn: -11 + Math.sin(t * 0.48) * 8,
+      tilt: Math.sin(t * 0.42) * 8 + Math.sin(t * 1.1) * 1.6,
+      roll: Math.sin(t * 0.75) * 4.2,
+      gazeX: Math.sin(t * 0.55) * 3.6,
+      gazeY: -1.6 + Math.sin(t * 0.38) * 2,
+      blink: t % 1.45 > 1.26,
+      d0: 0.2 + 0.8 * Math.max(0, Math.sin(t * 2.6)),
+      d1: 0.2 + 0.8 * Math.max(0, Math.sin(t * 2.6 - 0.7)),
+      d2: 0.2 + 0.8 * Math.max(0, Math.sin(t * 2.6 - 1.4))
+    }
+  }
+
+  return {
+    turn: Math.sin(t * 0.5) * 1.5,
+    tilt: Math.sin(t * 0.27),
+    roll: Math.sin(t * 0.85) * 1.2,
+    gazeX: 0,
+    gazeY: 0,
+    blink: t % 3.2 > 3.02,
+    d0: 0,
+    d1: 0,
+    d2: 0
+  }
+}
+
+function paintMathFace(svg, t) {
+  const mood = svg.getAttribute('data-hb-mood') || 'idle'
+  const shape = svg.getAttribute('data-hb-shape') || 'circle'
+  const pose = facePose(mood, t)
+  const body = svg.querySelector('[data-hb-body]')
+  const open = svg.querySelector('[data-hb-open]')
+  const shut = svg.querySelector('[data-hb-shut]')
+  const el = svg.querySelector('[data-hb-el]')
+  const er = svg.querySelector('[data-hb-er]')
+  const dots = svg.querySelectorAll('[data-hb-dot]')
+
+  if (body) {
+    if (shape === 'cloud') {
+      body.setAttribute('d', 'M11 32 a7.5 7.5 0 0 1 -1 -14.9 A9.5 9.5 0 0 1 29 12.5 A7 7 0 0 1 30 32 Z')
+    } else {
+      const ring = sampleFaceRing(shape).map(([x, y]) => projectFacePoint(x, y, pose.turn, pose.tilt, pose.roll))
+      body.setAttribute('d', ringToPath(ring))
+    }
+  }
+
+  const eyeY = (shape === 'cloud' ? 22 : 17.2) + pose.gazeY
+  const eyeL = 15.4 + pose.gazeX
+  const eyeR = 24.6 + pose.gazeX
+
+  if (el) {
+    el.setAttribute('cx', eyeL)
+    el.setAttribute('cy', eyeY)
+  }
+
+  if (er) {
+    er.setAttribute('cx', eyeR)
+    er.setAttribute('cy', eyeY)
+  }
+
+  if (open) {
+    open.setAttribute('opacity', pose.blink ? '0' : '1')
+  }
+
+  if (shut) {
+    shut.setAttribute('d', `M${eyeL - 2.6} ${eyeY} L${eyeL + 2.6} ${eyeY} M${eyeR - 2.6} ${eyeY} L${eyeR + 2.6} ${eyeY}`)
+    shut.setAttribute('opacity', pose.blink ? '1' : '0')
+  }
+
+  dots.forEach((dot, i) => {
+    const o = i === 0 ? pose.d0 : i === 1 ? pose.d1 : pose.d2
+    dot.setAttribute('opacity', String(o))
+  })
+
+  svg.style.transform = `rotate(${pose.tilt}deg)`
+  svg.style.transformOrigin = '50% 70%'
+}
+
+function walkMathFaces(root, acc) {
+  if (!root || !root.querySelectorAll) {
+    return acc
+  }
+
+  root.querySelectorAll('svg[data-hb-math]').forEach(node => acc.push(node))
+  root.querySelectorAll('*').forEach(el => {
+    if (el.shadowRoot) {
+      walkMathFaces(el.shadowRoot, acc)
+    }
+  })
+  return acc
+}
+
+function startFaceClock() {
+  if (typeof window === 'undefined' || window.__hbFaceClock) {
+    return
+  }
+
+  window.__hbFaceClock = true
+  const t0 = performance.now()
+  // The shadow-root walk over the whole document is the expensive part —
+  // do it at ~1Hz and paint the cached list per frame. Skip paints while
+  // the window is hidden; rAF is throttled there anyway, but be explicit.
+  let faces = []
+  let lastScan = -Infinity
+
+  const tick = now => {
+    if (!document.hidden) {
+      if (now - lastScan > 1000) {
+        faces = walkMathFaces(document, [])
+        lastScan = now
+      }
+      const t = (now - t0) / 1000
+      for (const svg of faces) {
+        if (svg.isConnected) {
+          paintMathFace(svg, t)
+        }
+      }
+    }
+    window.requestAnimationFrame(tick)
+  }
+
+  window.requestAnimationFrame(tick)
+}
+
+/**
+ * Live math face. Photos still use <img>. Shape avatars stay SVG so
+ * the clock can move them (a baked PNG cannot).
+ */
+function BotFace({ shape, color, image, size = 36, name = 'agent', mood = 'idle' }) {
+  startFaceClock()
+
+  if (image) {
+    return jsx('img', {
+      src: image,
+      alt: '',
+      'aria-hidden': true,
+      style: { width: size, height: size, borderRadius: '22%', objectFit: 'cover', display: 'block' }
+    })
+  }
+
+  // Sigils are line art (no filled body) — the math clock rebuilds filled
+  // outlines, which would turn a stored sigil pick into a blank circle.
+  // Keep the legacy static render for them so old picks still draw.
+  if (shape.startsWith('sigil-')) {
+    const eyes = jsxs('g', {
+      children: [
+        jsx('circle', { cx: 16, cy: 14, r: 2.4, fill: color }),
+        jsx('circle', { cx: 24, cy: 14, r: 2.4, fill: color })
+      ]
+    })
+    return jsxs('svg', {
+      'data-bot-face': name,
+      viewBox: '0 0 40 40',
+      width: size,
+      height: size,
+      'aria-hidden': true,
+      children: [shapeNode(shape, color, name), eyes]
+    })
+  }
+
+  const working = mood === 'work'
+  const eyeFill = isDarkColor(color) ? 'rgba(232,220,195,0.95)' : 'rgba(0,0,0,0.85)'
+  const ring = sampleFaceRing(shape)
+  const rest = facePose(working ? 'work' : 'idle', 0)
+
+  return jsxs('svg', {
+    'data-bot-face': name,
+    'data-hb-math': '1',
+    'data-hb-mood': working ? 'work' : 'idle',
+    'data-hb-shape': shape || 'circle',
+    viewBox: '0 0 40 44',
+    width: size,
+    height: size,
+    'aria-hidden': true,
+    style: { overflow: 'visible', display: 'block' },
+    children: [
+      jsx('path', {
+        'data-hb-body': '1',
+        d: shape === 'cloud'
+          ? 'M11 32 a7.5 7.5 0 0 1 -1 -14.9 A9.5 9.5 0 0 1 29 12.5 A7 7 0 0 1 30 32 Z'
+          : ringToPath(ring),
+        fill: color
+      }),
+      jsxs('g', {
+        'data-hb-open': '1',
+        children: [
+          jsx('ellipse', { 'data-hb-el': '1', cx: 15.4, cy: 17.2, rx: 2.2, ry: working ? 2.6 : 2.3, fill: eyeFill }),
+          jsx('ellipse', { 'data-hb-er': '1', cx: 24.6, cy: 17.2, rx: 2.2, ry: working ? 2.6 : 2.3, fill: eyeFill }),
+          jsx('circle', { cx: 14.8, cy: 16.5, r: 0.65, fill: 'rgba(255,255,255,0.85)' }),
+          jsx('circle', { cx: 24, cy: 16.5, r: 0.65, fill: 'rgba(255,255,255,0.85)' })
+        ]
+      }),
+      jsx('path', {
+        'data-hb-shut': '1',
+        d: 'M12.8 17.2 L18 17.2 M22 17.2 L27.2 17.2',
+        stroke: eyeFill,
+        strokeWidth: 2,
+        strokeLinecap: 'round',
+        fill: 'none',
+        opacity: 0
+      }),
+      working
+        ? jsxs('g', {
+            children: [
+              jsx('circle', { 'data-hb-dot': '1', cx: 16.4, cy: 41.2, r: 1.15, fill: color, opacity: rest.d0 }),
+              jsx('circle', { 'data-hb-dot': '1', cx: 20, cy: 41.2, r: 1.15, fill: color, opacity: rest.d1 }),
+              jsx('circle', { 'data-hb-dot': '1', cx: 23.6, cy: 41.2, r: 1.15, fill: color, opacity: rest.d2 })
+            ]
+          })
+        : null
+    ]
+  })
+}
+
+/** Map a Dock profile to a deterministic Bot-Mode face. */
+function dockBotFaceSpec(profile) {
+  const name = (typeof profile === 'string' ? profile : profile?.name) || 'agent'
+  const shape = defaultShapeFor(name)
+  let hash = 0
+  for (const ch of name) hash = (hash * 31 + ch.charCodeAt(0)) >>> 0
+  const color = AVATAR_COLORS[hash % AVATAR_COLORS.length]
+  return { name, shape, color }
+}
+
 function ProfileAvatar({ profile, active = false, size = 'md', label }) {
   const display = profileDisplayLabel(profile) || 'Agent'
   const dimensions = size === 'sm' ? 'size-5 text-[0.6rem]' : 'size-7 text-[0.64rem]'
+  const px = size === 'sm' ? 20 : 28
+  const spec = dockBotFaceSpec(profile)
+  let face = null
+  try {
+    face = jsx(BotFace, { shape: spec.shape, color: spec.color, image: null, size: px, name: spec.name, mood: active ? 'work' : 'idle' })
+  } catch {
+    face = null
+  }
   return jsxs('span', {
     'aria-label': label || `${display} avatar${active ? ', working' : ''}`,
     className: cn(
-      'relative inline-grid shrink-0 place-items-center rounded-lg border font-semibold tracking-[-0.02em]',
+      'relative inline-grid shrink-0 place-items-center rounded-lg border',
       dimensions,
       active
-        ? 'border-(--ui-accent) bg-[color-mix(in_srgb,var(--ui-accent)_16%,var(--ui-bg-secondary))] text-(--ui-accent)'
-        : 'border-(--ui-stroke-secondary) bg-(--ui-bg-secondary) text-(--ui-text-secondary)'
+        ? 'border-(--ui-accent) bg-[color-mix(in_srgb,var(--ui-accent)_16%,var(--ui-bg-secondary))]'
+        : 'border-(--ui-stroke-secondary) bg-(--ui-bg-secondary)'
     ),
     role: 'img',
     title: display,
     children: [
-      jsx('span', { 'aria-hidden': true, children: profileAvatarInitials(profile) }),
+      face || jsx('span', { 'aria-hidden': true, className: 'font-semibold tracking-[-0.02em] text-(--ui-text-secondary)', children: profileAvatarInitials(profile) }),
       active
         ? jsx('span', {
             'aria-hidden': true,
