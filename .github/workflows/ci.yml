@@ -44,7 +44,7 @@ jobs:
           rm -f plugin_check.mjs
 
       - name: Run JS state tests
-        run: node --test tests/test_dock_state.mjs
+        run: node --test tests/test_dock_state.mjs tests/test_botface.mjs
 
       - name: Run Python test suite
         run: python -m unittest discover -s tests -v
