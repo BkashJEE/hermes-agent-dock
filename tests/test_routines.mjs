@@ -17,6 +17,14 @@ function loadPure() {
   )
 }
 
+function loadMention() {
+  const ctx = vm.createContext({ console })
+  const start = src.indexOf('function parseMentionProfile')
+  const end = src.indexOf('// ── Bot-Mode port: Routines row UI')
+  assert.ok(start !== -1 && end !== -1 && start < end, 'mention parser found')
+  return vm.runInContext(src.slice(start, end) + '\n;parseMentionProfile', ctx)
+}
+
 test('scheduleLabel humanizes Hermes schedule strings', () => {
   const { scheduleLabel } = loadPure()
   assert.equal(scheduleLabel('every 60m'), 'Hourly')
@@ -92,4 +100,16 @@ test('relativeRoutineTime formats upcoming runs', () => {
   assert.equal(relativeRoutineTime(soon), 'next in 5m')
   const hours = new Date(Date.now() + 3 * 3600000).toISOString()
   assert.equal(relativeRoutineTime(hours), 'next in 3h')
+})
+
+test('parseMentionProfile routes leading @profile to a known profile', () => {
+  const parse = loadMention()
+  const profiles = [{ name: 'jarvis' }, { name: 'CFO' }, { name: 'default' }]
+  assert.equal(parse('@jarvis run the brief', profiles), 'jarvis')
+  assert.equal(parse('@CFO summarize the ledger', profiles), 'CFO')
+  assert.equal(parse('hello @jarvis', profiles), null, 'mid-message mention is not a route')
+  assert.equal(parse('@ghost do it', profiles), null, 'unknown profile is not a route')
+  assert.equal(parse('plain message', profiles), null)
+  assert.equal(parse('', profiles), null)
+  assert.equal(parse(null, profiles), null)
 })
