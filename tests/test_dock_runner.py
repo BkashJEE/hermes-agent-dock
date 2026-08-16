@@ -188,10 +188,14 @@ class DockRunnerTests(unittest.TestCase):
                     runner._request_image_paths({"images": [str(outside)]})
 
     def test_diagnostic_tail_keeps_last_actionable_line(self):
-        self.assertEqual(
-            runner._diagnostic_tail("Initializing agent\nProvider rejected request"),
-            "Provider rejected request",
-        )
+        import types
+        redact_mod = types.ModuleType("agent.redact")
+        redact_mod.redact_sensitive_text = lambda text: text
+        with patch.dict(sys.modules, {"agent": types.ModuleType("agent"), "agent.redact": redact_mod}):
+            self.assertEqual(
+                runner._diagnostic_tail("Initializing agent\nProvider rejected request"),
+                "Provider rejected request",
+            )
 
     def test_diagnostic_tail_redaction_failure_never_returns_raw_text(self):
         raw = "request failed with secret-token-value"
