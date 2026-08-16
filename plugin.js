@@ -1156,6 +1156,17 @@ function SolvingWorkingOrb({ label = 'Agent working' }) {
   })
 }
 
+/** Parse a leading "@profile" mention into a known profile name (Bot-Mode a2a handoff).
+ *  Returns the profile's canonical name when the mention names a real profile,
+ *  else null (message is left untouched and routes to the current profile). */
+function parseMentionProfile(text, profiles) {
+  const m = /^@([a-z0-9][a-z0-9_-]*)\s+/i.exec(String(text || '').trim())
+  if (!m) return null
+  const want = m[1].toLowerCase()
+  const hit = (Array.isArray(profiles) ? profiles : []).find(p => String(p?.name || '').toLowerCase() === want)
+  return hit ? hit.name : null
+}
+
 // ── Bot-Mode port: Routines row UI ──────────────────────────────────────────
 
 function RoutineRow({ job, busy, onAction }) {
@@ -2777,7 +2788,11 @@ function AgentDock({ mode = DEFAULT_DOCK_MODE, onToggleMode }) {
       return
     }
     if (activeJob) return
-    const profile = currentName
+    // Bot-Mode a2a handoff: a leading @profile routes the job to that profile.
+    // The mention stays in the message — the target's SOUL reads it as a handoff
+    // marker, matching Bot-Mode's agent-to-agent protocol.
+    const typedProfile = currentName
+    const profile = parseMentionProfile(message, profiles) || currentName
     const requestId = makeRequestId()
     const sessionId = sessions[profile] || null
     const assignment = assignTask === true && supportsKanbanAssignment
@@ -2799,8 +2814,8 @@ function AgentDock({ mode = DEFAULT_DOCK_MODE, onToggleMode }) {
       started_at: Date.now()
     })) return
     append(profile, optimistic)
-    setDraft(profile, '')
-    setAttachmentsByProfile(current => ({ ...current, [profile]: [] }))
+    setDraft(typedProfile, '')
+    setAttachmentsByProfile(current => ({ ...current, [typedProfile]: [] }))
     const body = buildJobPayload({
       profile,
       provider: modelControlsReady ? effectiveProvider : '',
