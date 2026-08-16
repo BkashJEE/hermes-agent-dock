@@ -68,6 +68,10 @@ class BackendSecurityTests(unittest.TestCase):
         self.home = Path(self.temp_dir.name)
         self.home_patch = patch.object(api, "get_hermes_home", return_value=self.home)
         self.home_patch.start()
+        # Register the test inventory so profile-scoped paths resolve without a
+        # live Hermes install.
+        self.rows_patch = patch.object(api, "_profile_rows", return_value=PROFILE_ROWS)
+        self.rows_patch.start()
         api._reset_job_store_for_tests()
         api._JOBS.clear()
         api._REQUEST_JOBS.clear()
@@ -76,6 +80,7 @@ class BackendSecurityTests(unittest.TestCase):
     def tearDown(self):
         api._reset_job_store_for_tests()
         self.home_patch.stop()
+        self.rows_patch.stop()
         self.temp_dir.cleanup()
 
     def request(self, **overrides):
@@ -126,6 +131,25 @@ class BackendSecurityTests(unittest.TestCase):
         self.assertTrue(api._job_store().request_cancel(job_id, token))
         self.assertTrue(api._job_store().complete_cancelled(job_id, token))
         job.update({"status": "cancelled", "finished_at": 1})
+
+    def temp_profile_home(self):
+        """Point the profile's progress directory at a throwaway tree."""
+        directory = Path(self.temp_dir.name) / "profile-home"
+        (directory / "cache" / "agent-dock-progress").mkdir(parents=True, exist_ok=True)
+        return directory
+
+    def complete_seeded_job(self, job_id, outcome="done"):
+        """Drive a seeded job through its real lifecycle to a terminal state."""
+        job = api._JOBS[job_id]
+        token = job["_attempt_token"]
+        store = api._job_store()
+        self.assertTrue(store.mark_running(job_id, token))
+        self.assertTrue(store.begin_finalization(job_id, token, session_id=None))
+        if outcome == "done":
+            self.assertTrue(store.publish(job_id, token))
+        else:
+            self.assertTrue(store.complete_error(job_id, token, "provider rejected request"))
+        job.update({"status": outcome, "finished_at": 1})
 
     def test_build_command_keeps_prompt_out_of_argv(self):
         hostile = "hello; rm -rf / && $(whoami)"
@@ -940,6 +964,242 @@ class BackendSecurityTests(unittest.TestCase):
             self.assertEqual(job["subagents"][0]["status"], "interrupted")
             self.assertEqual(job["subagents"][0]["finished_at"], 20)
             self.assertIsNone(job["subagents"][0]["current_tool"])
+
+
+    def test_job_ledger_listing_is_bounded_privacy_reduced_and_newest_first(self):
+        first = self.request(request_id="req-list-first-123")
+        second = self.request(request_id="req-list-second-123")
+        first_job = self.seed_durable_job("j" * 32, first)
+        second_job = self.seed_durable_job("a" * 32, second)
+        with self.validation():
+            listing = asyncio.run(api.list_jobs_route(limit=10))
+        self.assertEqual(listing["count"], 2)
+        ids = [job["id"] for job in listing["jobs"]]
+        self.assertEqual(ids, ["j" * 32, "a" * 32])
+        for job in listing["jobs"]:
+            self.assertIn("status", job)
+            self.assertIn("profile", job)
+            self.assertIsNone(job.get("response"))
+            self.assertFalse({"attempt_token", "_attempt_token", "_process"} & set(job))
+        with self.validation():
+            bounded = asyncio.run(api.list_jobs_route(limit=1))
+        self.assertEqual(bounded["count"], 1)
+
+    def test_assign_after_creates_profile_owned_card_and_links_terminal_job(self):
+        request = self.request(request_id="req-assign-after-123")
+        job = self.seed_durable_job("b" * 32, request)
+        self.complete_seeded_job(job["id"], outcome="done")
+        connection = Mock()
+        kanban = Mock()
+        kanban.connect.return_value = connection
+        kanban.create_task.return_value = "t_assign_after"
+        with self.validation(), patch.object(
+            api, "_kanban_module", return_value=kanban
+        ), patch.object(api, "_kanban_workspace", return_value=Path("C:/organization")):
+            result = asyncio.run(
+                api.assign_job(job["id"], api.AssignAfterRequest(message="Ship the verified fix"))
+            )
+        self.assertEqual(result["kanban_task_id"], "t_assign_after")
+        self.assertEqual(result["kanban_board"], "executive-organization")
+        kwargs = kanban.create_task.call_args.kwargs
+        self.assertEqual(kwargs["assignee"], "jarvis")
+        self.assertEqual(kwargs["board"], "executive-organization")
+        self.assertEqual(kwargs["initial_status"], "ready")
+        self.assertEqual(kwargs["idempotency_key"], f"agent-dock:assign-after:jarvis:{job['id']}")
+        self.assertIn(job["id"], kwargs["body"])
+        self.assertEqual(
+            api._job_store().get_job(job["id"])["kanban_task_id"],
+            "t_assign_after",
+        )
+        connection.close.assert_called_once()
+
+    def test_assign_after_is_idempotent_and_never_creates_a_second_card(self):
+        request = self.request(request_id="req-assign-idem-123")
+        job = self.seed_durable_job("c" * 32, request)
+        self.complete_seeded_job(job["id"], outcome="done")
+        kanban = Mock()
+        kanban.create_task.return_value = "t_assign_idem"
+        with self.validation(), patch.object(api, "_kanban_module", return_value=kanban), patch.object(
+            api, "_kanban_workspace", return_value=Path("C:/organization")
+        ), patch.object(api, "_profile_home", return_value=self.temp_profile_home()):
+            first = asyncio.run(
+                api.assign_job(job["id"], api.AssignAfterRequest(message="Task one"))
+            )
+            second = asyncio.run(
+                api.assign_job(job["id"], api.AssignAfterRequest(message="Task one again"))
+            )
+        self.assertEqual(first["kanban_task_id"], "t_assign_idem")
+        self.assertEqual(second["kanban_task_id"], "t_assign_idem")
+        kanban.create_task.assert_called_once()
+
+    def test_assign_after_rejects_active_jobs(self):
+        request = self.request(request_id="req-assign-active-123")
+        job = self.seed_durable_job("d" * 32, request)
+        with self.validation():
+            with self.assertRaises(api.HTTPException) as raised:
+                asyncio.run(
+                    api.assign_job(job["id"], api.AssignAfterRequest(message="Too early"))
+                )
+        self.assertEqual(raised.exception.status_code, 409)
+        self.assertIn("still active", raised.exception.detail)
+
+    def test_assign_after_error_never_exposes_private_path(self):
+        request = self.request(request_id="req-assign-path-123")
+        job = self.seed_durable_job("e" * 32, request)
+        self.complete_seeded_job(job["id"], outcome="done")
+        private_path = r"C:\Users\Alice\private\board.sqlite"
+        with self.validation(), patch.object(
+            api, "_kanban_module", side_effect=PermissionError(f"{private_path}: permission denied")
+        ):
+            with self.assertRaises(api.HTTPException) as raised:
+                asyncio.run(
+                    api.assign_job(job["id"], api.AssignAfterRequest(message="Task"))
+                )
+        self.assertEqual(raised.exception.status_code, 503)
+        self.assertEqual(
+            raised.exception.detail,
+            "Kanban assignment failed; inspect local Hermes logs",
+        )
+        self.assertNotIn(private_path, raised.exception.detail)
+
+    @patch.object(api.threading, "Thread")
+    def test_retry_preserves_identity_and_starts_one_fresh_attempt(self, thread_cls):
+        request = self.request(request_id="req-retry-123456")
+        job = self.seed_durable_job("f" * 32, request)
+        old_token = job["_attempt_token"]
+        self.assertTrue(api._job_store().mark_running(job["id"], old_token))
+        self.assertTrue(
+            api._job_store().complete_error(job["id"], old_token, "provider rejected request")
+        )
+        with self.validation(), patch.object(
+            api, "_build_command", return_value=[sys.executable, "runner", "--chat"]
+        ):
+            result = asyncio.run(
+                api.retry_job(
+                    job["id"],
+                    api.RetryRequest(message="Retry the failing run"),
+                )
+            )
+        self.assertEqual(result["request_id"], "req-retry-123456")
+        self.assertEqual(result["status"], "queued")
+        row = api._job_store().get_job(job["id"])
+        self.assertNotEqual(row["attempt_token"], old_token)
+        self.assertEqual(row["status"], "starting")
+        thread_cls.return_value.start.assert_called_once()
+
+    def test_retry_rejects_active_jobs(self):
+        request = self.request(request_id="req-retry-active-123")
+        job = self.seed_durable_job("0" * 32, request)
+        with self.validation():
+            with self.assertRaises(api.HTTPException) as raised:
+                asyncio.run(
+                    api.retry_job(job["id"], api.RetryRequest(message="Too early"))
+                )
+        self.assertEqual(raised.exception.status_code, 409)
+        self.assertIn("still active", raised.exception.detail)
+
+    @patch.object(api.threading, "Thread")
+    def test_retry_respects_concurrent_job_limit(self, thread_cls):
+        for index in range(api.MAX_CONCURRENT_JOBS):
+            active_id = "2" + f"{index:031x}"
+            active = self.seed_durable_job(active_id, self.request())
+            self.assertTrue(api._job_store().mark_running(active["id"], active["_attempt_token"]))
+        request = self.request(request_id="req-retry-limit-123")
+        job = self.seed_durable_job("9" * 32, request)
+        self.assertTrue(api._job_store().mark_running(job["id"], job["_attempt_token"]))
+        self.assertTrue(
+            api._job_store().complete_error(job["id"], job["_attempt_token"], "boom")
+        )
+        with self.validation(), patch.object(
+            api, "_build_command", return_value=[sys.executable, "runner", "--chat"]
+        ):
+            with self.assertRaises(api.HTTPException) as raised:
+                asyncio.run(
+                    api.retry_job(job["id"], api.RetryRequest(message="Over the limit"))
+                )
+        self.assertEqual(raised.exception.status_code, 429)
+        self.assertEqual(api._job_store().get_job(job["id"])["status"], "error")
+        thread_cls.assert_not_called()
+
+    @patch.object(api.threading, "Thread")
+    def test_retry_message_never_enters_durable_ledger(self, thread_cls):
+        sentinel = "RETRY_PRIVATE_SENTINEL"
+        request = self.request(request_id="req-retry-private-123")
+        job = self.seed_durable_job("5" * 32, request)
+        self.assertTrue(api._job_store().mark_running(job["id"], job["_attempt_token"]))
+        self.assertTrue(
+            api._job_store().complete_error(job["id"], job["_attempt_token"], "boom")
+        )
+        with self.validation(), patch.object(
+            api, "_build_command", return_value=[sys.executable, "runner", "--chat"]
+        ):
+            asyncio.run(api.retry_job(job["id"], api.RetryRequest(message=sentinel)))
+        database = api._job_store().database_path
+        api._reset_job_store_for_tests(clear_memory=False)
+        raw = database.read_bytes()
+        self.assertNotIn(sentinel.encode(), raw)
+
+    def test_unknown_job_paths_fail_closed(self):
+        with self.assertRaises(api.HTTPException) as raised:
+            asyncio.run(api.assign_job("not-a-job", api.AssignAfterRequest(message="x")))
+        self.assertEqual(raised.exception.status_code, 404)
+        with self.assertRaises(api.HTTPException) as raised:
+            asyncio.run(
+                api.retry_job("not-a-job", api.RetryRequest(message="x"))
+            )
+        self.assertEqual(raised.exception.status_code, 404)
+
+    @patch.object(api.threading, "Thread")
+    def test_retry_then_run_executes_fresh_message_and_completes(self, thread_cls):
+        request = self.request(request_id="req-retry-e2e-123456")
+        job = self.seed_durable_job("a1b2c3d4e5f60718293a4b5c6d7e8f90", request)
+        old_token = job["_attempt_token"]
+        self.assertTrue(api._job_store().mark_running(job["id"], old_token))
+        self.assertTrue(
+            api._job_store().complete_error(job["id"], old_token, "first attempt failed")
+        )
+
+        class FakeProcess:
+            returncode = 0
+
+            def __init__(self):
+                self.received = None
+
+            def communicate(self, input=None, timeout=None):
+                self.received = input
+                return "recovered reply", "session_id: 20260805_010203_a1b2c3\n"
+
+        process = FakeProcess()
+        with self.validation(), patch.object(
+            api, "_build_command", return_value=[sys.executable, "runner", "--chat"]
+        ), patch.object(api, "_catalog_environment", return_value={"HERMES_HOME": "C:/p"}), patch.object(
+            api.subprocess, "Popen", return_value=process
+        ):
+            retried = asyncio.run(
+                api.retry_job(
+                    job["id"],
+                    api.RetryRequest(message="fresh recovery instruction"),
+                )
+            )
+            new_token = api._JOBS[job["id"]]["_attempt_token"]
+            self.assertNotEqual(new_token, old_token)
+            # Rebuild the same SendRequest the endpoint handed the (mocked)
+            # worker, then drive the fresh attempt through the real worker path.
+            retry_request = api.RetryRequest(message="fresh recovery instruction")
+            send_request = api._retry_send_request(
+                {"profile": job["profile"], "request_id": job.get("request_id")},
+                retry_request,
+            )
+            api._run_job(job["id"], send_request)
+
+        self.assertEqual(api._JOBS[job["id"]]["status"], "done")
+        self.assertEqual(api._JOBS[job["id"]]["response"], "recovered reply")
+        self.assertEqual(
+            json.loads(process.received)["message"], "fresh recovery instruction"
+        )
+        row = api._job_store().get_job(job["id"])
+        self.assertEqual(row["status"], "done")
+        self.assertIsNotNone(row["finished_at"])
 
 
 if __name__ == "__main__":

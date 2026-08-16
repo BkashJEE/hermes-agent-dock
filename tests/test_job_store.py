@@ -248,5 +248,77 @@ class JobStoreTests(unittest.TestCase):
         self.assertIn("jobs", names)
 
 
+    def test_reset_attempt_rearms_terminal_job_with_fresh_token(self):
+        store = JobStore(hermes_home=self.home)
+        row = self.reserve(store)
+        token = row["attempt_token"]
+        self.assertTrue(store.mark_running(row["job_id"], token))
+        self.assertTrue(store.begin_finalization(row["job_id"], token, session_id=None))
+        self.assertTrue(store.complete_error(row["job_id"], token, "provider rejected request"))
+        self.assertEqual(store.get_job(row["job_id"])["status"], "error")
+
+        fresh = store.reset_attempt(row["job_id"], allow_statuses=frozenset({"done", "error", "cancelled", "interrupted"}))
+        self.assertIsNotNone(fresh)
+        self.assertEqual(fresh["job_id"], row["job_id"])
+        self.assertEqual(fresh["profile_id"], "jarvis")
+        self.assertEqual(fresh["request_id"], row["request_id"])
+        self.assertEqual(fresh["status"], "starting")
+        self.assertIsNotNone(fresh["attempt_token"])
+        self.assertNotEqual(fresh["attempt_token"], token)
+        self.assertIsNone(fresh["error_summary"])
+        self.assertIsNone(fresh["finished_at"])
+
+    def test_reset_attempt_is_idempotent_safe_and_fails_closed_on_active(self):
+        store = JobStore(hermes_home=self.home)
+        row = self.reserve(store)
+        token = row["attempt_token"]
+
+        # Active (starting) is not an allowed source status -> fails closed.
+        self.assertIsNone(
+            store.reset_attempt(row["job_id"], allow_statuses=frozenset({"done", "error", "cancelled", "interrupted"}))
+        )
+        self.assertEqual(store.get_job(row["job_id"])["status"], "starting")
+
+        # Unknown job -> fails closed.
+        self.assertIsNone(
+            store.reset_attempt("f" * 32, allow_statuses=frozenset({"done", "error", "cancelled", "interrupted"}))
+        )
+
+    def test_link_kanban_terminal_records_card_for_finished_job(self):
+        store = JobStore(hermes_home=self.home)
+        row = self.reserve(store)
+        token = row["attempt_token"]
+        self.assertTrue(store.mark_running(row["job_id"], token))
+        self.assertTrue(store.begin_finalization(row["job_id"], token, session_id=None))
+        self.assertTrue(store.publish(row["job_id"], token))
+        self.assertEqual(store.get_job(row["job_id"])["status"], "done")
+
+        self.assertTrue(
+            store.link_kanban_terminal(
+                row["job_id"],
+                kanban_task_id="t_assign_after",
+                kanban_board="executive-organization",
+                allow_statuses=frozenset({"done", "error", "cancelled", "interrupted"}),
+            )
+        )
+        stored = store.get_job(row["job_id"])
+        self.assertEqual(stored["kanban_task_id"], "t_assign_after")
+        self.assertEqual(stored["kanban_board"], "executive-organization")
+
+    def test_link_kanban_terminal_fails_closed_off_terminal_status(self):
+        store = JobStore(hermes_home=self.home)
+        row = self.reserve(store)
+        # Job is still `starting`; linking to a terminal card is not legal.
+        self.assertFalse(
+            store.link_kanban_terminal(
+                row["job_id"],
+                kanban_task_id="t_noop",
+                kanban_board="executive-organization",
+                allow_statuses=frozenset({"done", "error", "cancelled", "interrupted"}),
+            )
+        )
+        self.assertIsNone(store.get_job(row["job_id"])["kanban_task_id"])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -473,6 +473,71 @@ class JobStore:
             finished=True,
         )
 
+    def reset_attempt(
+        self,
+        job_id: str,
+        *,
+        allow_statuses: frozenset[str] | set[str],
+    ) -> dict[str, Any] | None:
+        """Re-arm a terminal job for exactly one new attempt.
+
+        Returns the fresh row (new attempt token, ``starting`` status) when the
+        reset is applied, or ``None`` when the job is unknown, not in an
+        allowed status, or lost a concurrent race. The job id, identity, and
+        idempotency key are preserved so the retry is the same logical job run
+        again — not a new job.
+        """
+        identity = self._identifier(job_id, allow_none=False) or ""
+        timestamp = self._now()
+        placeholders = ",".join("?" for _ in allow_statuses)
+        with self._connection(write=True) as db:
+            row = db.execute(
+                f"""
+                UPDATE jobs
+                SET status='starting',
+                    attempt_token=?,
+                    finished_at=NULL,
+                    updated_at=?,
+                    error_summary=NULL
+                WHERE job_id=? AND status IN ({placeholders})
+                """,
+                (self._token(), timestamp, identity, *allow_statuses),
+            )
+            if row.rowcount != 1:
+                return None
+            return self._get_row(db, identity)
+
+    def link_kanban_terminal(
+        self,
+        job_id: str,
+        *,
+        kanban_task_id: str,
+        kanban_board: str,
+        allow_statuses: frozenset[str] | set[str],
+    ) -> bool:
+        """Record card linkage for a terminal job.
+
+        ``update_kanban`` is guarded to live attempts only; assign-after
+        legally links a card to a finished job. The status guard is the
+        caller's explicit allow-set so a race to another state fails closed.
+        """
+        identity = self._identifier(job_id, allow_none=False) or ""
+        task = self._identifier(kanban_task_id, allow_none=False) or ""
+        board = self._identifier(kanban_board, allow_none=False) or ""
+        timestamp = self._now()
+        statuses = frozenset(allow_statuses)
+        placeholders = ",".join("?" for _ in statuses)
+        with self._connection(write=True) as db:
+            result = db.execute(
+                f"""
+                UPDATE jobs
+                SET kanban_task_id=?, kanban_board=?, updated_at=?
+                WHERE job_id=? AND status IN ({placeholders})
+                """,
+                (task, board, timestamp, identity, *statuses),
+            )
+            return result.rowcount == 1
+
     def update_kanban(
         self,
         job_id: str,

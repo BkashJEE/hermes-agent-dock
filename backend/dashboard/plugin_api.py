@@ -22,7 +22,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field, StrictBool, field_validator
 
 try:
@@ -277,6 +277,62 @@ class ObserveRunRequest(BaseModel):
 ControlMessageRequest.model_rebuild(_types_namespace={"StrictBool": StrictBool})
 ReceiptRequest.model_rebuild(_types_namespace={"Any": Any})
 ObserveRunRequest.model_rebuild(_types_namespace={"Any": Any})
+
+
+def _bounded_message(value: Any) -> str:
+    if not isinstance(value, str):
+        raise ValueError("message must be a string")
+    if len(value) > MAX_MESSAGE_CHARS:
+        raise ValueError(f"Message exceeds {MAX_MESSAGE_CHARS} characters")
+    normalized = value.strip()
+    if not normalized:
+        raise ValueError("Message is empty")
+    return normalized
+
+
+class AssignAfterRequest(BaseModel):
+    """Assign a finished job to the Kanban board without re-running it."""
+
+    message: str
+
+    @field_validator("message", mode="before")
+    @classmethod
+    def normalize_bounded_message(cls, value: Any) -> str:
+        return _bounded_message(value)
+
+
+class RetryRequest(BaseModel):
+    """Re-run a terminal job with a fresh attempt under the same identity."""
+
+    message: str
+    model: str | None = None
+    provider: str | None = None
+    session_id: str | None = None
+    reasoning_effort: str | None = "none"
+    fast: bool = False
+    images: list[ImageAttachment] = Field(default_factory=list)
+
+    @field_validator("message", mode="before")
+    @classmethod
+    def normalize_bounded_message(cls, value: Any) -> str:
+        return _bounded_message(value)
+
+    @field_validator("images", mode="before")
+    @classmethod
+    def bound_image_count(cls, value: Any) -> Any:
+        if value is None:
+            return []
+        if not isinstance(value, list):
+            raise ValueError("Images must be a list")
+        if len(value) > MAX_IMAGE_ATTACHMENTS:
+            raise ValueError(f"At most {MAX_IMAGE_ATTACHMENTS} images can be attached")
+        return value
+
+
+AssignAfterRequest.model_rebuild(_types_namespace={"Any": Any})
+RetryRequest.model_rebuild(
+    _types_namespace={"ImageAttachment": ImageAttachment, "Any": Any}
+)
 
 
 def _control_store() -> Any:
@@ -597,6 +653,49 @@ def _create_kanban_task(request: SendRequest, job_id: str) -> str | None:
             reasoning_effort=request.reasoning_effort or "none",
             initial_status="running",
             session_id=request.session_id,
+            board=KANBAN_BOARD,
+        )
+    finally:
+        conn.close()
+
+
+def _create_kanban_task_for_job(
+    *,
+    profile_id: str,
+    model: str | None,
+    provider: str | None,
+    reasoning_effort: str,
+    session_id: str | None,
+    job_id: str,
+    title: str,
+    body: str,
+    idempotency_key: str,
+    initial_status: str,
+) -> str:
+    """Create a Kanban card on the shared board for an existing durable job.
+
+    Centralized so create-time assignment and assign-after produce the same
+    card shape. The idempotency key is the caller's responsibility; it is what
+    makes a repeat of the same logical assignment a no-op.
+    """
+    kb = _kanban_module()
+    conn = kb.connect(board=KANBAN_BOARD)
+    try:
+        return kb.create_task(
+            conn,
+            title=title,
+            body=body,
+            assignee=profile_id,
+            created_by="default",
+            workspace_kind="dir",
+            workspace_path=str(_kanban_workspace()),
+            priority=50,
+            idempotency_key=idempotency_key,
+            model_override=(model or "").strip() or None,
+            provider_override=(provider or "").strip() or None,
+            reasoning_effort=reasoning_effort or "none",
+            initial_status=initial_status,
+            session_id=session_id,
             board=KANBAN_BOARD,
         )
     finally:
@@ -1623,6 +1722,226 @@ async def cancel_job(job_id: str) -> dict[str, Any]:
             _JOBS[job_id] = current
         _settle_job_kanban(job_id, "cancelled", "Cancelled by Dad from Agent Dock")
     return _public_job(_load_durable_job(job_id) or current)
+
+
+TERMINAL_JOB_STATUSES = frozenset({"done", "error", "cancelled", "interrupted"})
+ASSIGNABLE_JOB_STATUSES = frozenset({"done", "error", "cancelled", "interrupted"})
+
+
+@router.get("/jobs")
+async def list_jobs_route(limit: int = Query(default=50, ge=1, le=200)) -> dict[str, Any]:
+    """List durable jobs, newest first, bounded and privacy-reduced.
+
+    The ledger never stores prompts or responses; the list therefore
+    exposes only identity, profile, status, and lifecycle timestamps.
+    """
+    _evict_completed_jobs()
+    store = _job_store()
+    rows = store.list_jobs(limit=limit)
+    jobs = []
+    for row in rows:
+        job_id = row["job_id"]
+        with _JOBS_LOCK:
+            job = _JOBS.get(job_id)
+        if job is None:
+            job = _load_durable_job(job_id)
+            if job is None:
+                continue
+        jobs.append(_public_job(job))
+    return {"jobs": jobs, "count": len(jobs)}
+
+
+@router.post("/jobs/{job_id}/assign", status_code=201)
+async def assign_job(job_id: str, request: AssignAfterRequest) -> dict[str, Any]:
+    """Assign a finished job to the shared Kanban board without re-running it.
+
+    The durable ledger intentionally stores no prompt, so the caller supplies
+    the task text for the card. Repeating the same logical assignment is a
+    no-op: the idempotency key is the stable job ID, and the existing card is
+    returned instead of creating a duplicate.
+    """
+    if not re.fullmatch(r"[a-f0-9]{32}", job_id):
+        raise HTTPException(status_code=404, detail="Job not found")
+    store = _job_store()
+    row = store.get_job(job_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if row.get("kanban_task_id"):
+        with _JOBS_LOCK:
+            job = _JOBS.get(job_id)
+        if job is None:
+            job = _load_durable_job(job_id)
+        if job is not None:
+            return _public_job(job)
+
+    status = row.get("status")
+    if status not in ASSIGNABLE_JOB_STATUSES:
+        if status in {"starting", "queued", "running", "finalizing"}:
+            raise HTTPException(status_code=409, detail="Job is still active; assign after it finishes")
+        raise HTTPException(status_code=409, detail="Job cannot be assigned in this state")
+
+    profile_id = row["profile_id"]
+    try:
+        _normalize_profile(profile_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Job profile is no longer valid") from None
+
+    title = _task_title(request.message)
+    body = (
+        "Assigned after completion through Hermes Agent Dock.\n\n"
+        f"Accountable profile: {profile_id}\n"
+        f"Agent Dock job: {job_id}\n"
+        f"Outcome: {status}\n\n"
+        f"{request.message.strip()}"
+    )
+    try:
+        task_id = _create_kanban_task_for_job(
+            profile_id=profile_id,
+            model=row.get("model"),
+            provider=row.get("provider"),
+            reasoning_effort=row.get("reasoning_effort") or "none",
+            session_id=row.get("session_id"),
+            job_id=job_id,
+            title=title,
+            body=body,
+            idempotency_key=f"agent-dock:assign-after:{profile_id}:{job_id}",
+            initial_status="ready",
+        )
+    except (PermissionError, RuntimeError, ValueError, OSError) as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Kanban assignment failed; inspect local Hermes logs",
+        ) from exc
+
+    if not store.link_kanban_terminal(
+        job_id,
+        kanban_task_id=task_id,
+        kanban_board=KANBAN_BOARD,
+        allow_statuses=ASSIGNABLE_JOB_STATUSES,
+    ):
+        # The card was created but the job left an assignable state mid-flight.
+        # Leave the card for the operator; never invent a settlement.
+        with _JOBS_LOCK:
+            job = _JOBS.get(job_id)
+            if job is not None:
+                job["kanban_error"] = "Job state changed during assignment"
+        raise HTTPException(status_code=409, detail="Job state changed during assignment")
+
+    refreshed = _load_durable_job(job_id)
+    if refreshed is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+    with _JOBS_LOCK:
+        current = _JOBS.get(job_id) or refreshed
+        current.update({"kanban_task_id": task_id, "kanban_board": KANBAN_BOARD})
+        _JOBS[job_id] = current
+    return _public_job(current)
+
+
+def _retry_send_request(job: dict[str, Any], request: RetryRequest) -> SendRequest:
+    profile = job["profile"]
+    message = request.message
+    provider = (request.provider or "").strip() or None
+    model = (request.model or "").strip() or None
+    effort = request.reasoning_effort or "none"
+    session_id = request.session_id
+    if session_id and not SESSION_ID_RE.fullmatch(session_id):
+        raise ValueError("Invalid Hermes session ID")
+    return SendRequest(
+        profile=profile,
+        model=model,
+        provider=provider,
+        message=message,
+        request_id=job.get("request_id"),
+        session_id=session_id,
+        reasoning_effort=effort,
+        fast=bool(request.fast),
+        assign_task=False,
+        images=list(request.images),
+    )
+
+
+@router.post("/jobs/{job_id}/retry", status_code=202)
+async def retry_job(job_id: str, request: RetryRequest) -> dict[str, Any]:
+    """Re-run a terminal job under its stable identity with a fresh attempt.
+
+    The durable ledger stores no prompt, so the caller re-supplies the task
+    text. The job ID, profile, and request ID are preserved — a retry is the
+    same logical job run again, not a new job. Automatic recovery (the
+    dispatcher re-queuing a failed task) uses the prior attempt's exact
+    parameters; explicit user retries may pass overrides, which are
+    re-validated against the profile catalog.
+    """
+    if not re.fullmatch(r"[a-f0-9]{32}", job_id):
+        raise HTTPException(status_code=404, detail="Job not found")
+    _evict_completed_jobs()
+    store = _job_store()
+    row = store.get_job(job_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if row.get("status") not in TERMINAL_JOB_STATUSES:
+        if row.get("status") in {"starting", "queued", "running", "finalizing"}:
+            raise HTTPException(status_code=409, detail="Job is still active; retry after it finishes")
+        raise HTTPException(status_code=409, detail="Job cannot be retried in this state")
+
+    profile_id = row["profile_id"]
+    try:
+        _normalize_profile(profile_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Job profile is no longer valid") from None
+
+    try:
+        send_request = _retry_send_request(
+            {
+                "profile": profile_id,
+                "request_id": row.get("request_id"),
+            },
+            request,
+        )
+        _build_command(send_request)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    with _JOBS_LOCK:
+        active = sum(
+            1
+            for job in _JOBS.values()
+            if job["status"] in {"starting", "queued", "running", "finalizing", "cancelling"}
+        )
+        if active >= MAX_CONCURRENT_JOBS:
+            raise HTTPException(status_code=429, detail="Agent Dock already has four active sessions")
+
+    fresh_row = store.reset_attempt(job_id, allow_statuses=TERMINAL_JOB_STATUSES)
+    if fresh_row is None:
+        refreshed = _load_durable_job(job_id)
+        if refreshed is None:
+            raise HTTPException(status_code=404, detail="Job not found")
+        raise HTTPException(status_code=409, detail="Job state changed; retry again")
+
+    try:
+        _create_progress_file(profile_id, job_id)
+    except FileExistsError:
+        pass  # prior attempt's file; runner appends per-attempt entries
+    except OSError as exc:
+        store.complete_error(job_id, fresh_row["attempt_token"], "Subagent progress store is unavailable")
+        raise HTTPException(status_code=503, detail="Subagent progress store is unavailable") from exc
+
+    with _JOBS_LOCK:
+        existing = _JOBS.get(job_id)
+        job = _memory_job_from_row(fresh_row, existing)
+        job.update({"subagents": [], "_subagent_progress_path": _progress_root(profile_id) / f"{job_id}.jsonl", "_subagent_started_ids": set()})
+        _JOBS[job_id] = job
+        if row.get("request_id"):
+            _REQUEST_JOBS[_job_key(profile_id, row["request_id"])] = job_id
+
+    threading.Thread(
+        target=_run_job,
+        args=(job_id, send_request),
+        name=f"agent-dock-{job_id[:8]}",
+        daemon=True,
+    ).start()
+    return _public_job(_JOBS[job_id])
 
 
 def _achievement_snapshot() -> Path | None:
