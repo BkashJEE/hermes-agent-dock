@@ -4,7 +4,7 @@ A native Hermes Desktop floating card by default for direct chat with configured
 
 > Community project. Not an official Nous Research release.
 
-**Release candidate:** v0.4.0 (local, not yet published) · [Security policy](SECURITY.md) · [Third-party notices](THIRD_PARTY_NOTICES.md)
+**Release candidate:** v0.4.0 · [Security policy](SECURITY.md) · [Third-party notices](THIRD_PARTY_NOTICES.md)
 
 <p align="center">
   <img src="docs/assets/agent-dock-dark-cover.png" alt="Dark conceptual workflow illustration showing a busy Hermes orchestrator and direct Agent Dock paths to researcher, builder, reviewer, and vision specialists" width="100%">
@@ -18,7 +18,7 @@ Agent Dock is for people who already use more than one Hermes profile and want t
 
 ### Compatibility at a glance
 
-- **Verified:** Windows 10, Hermes Desktop, and the v0.3.0 release tests documented below.
+- **Verified:** Windows 10, Hermes Desktop, and the v0.4.0 release tests documented below.
 - **Required:** Hermes Agent with Hermes Desktop, Python 3.10+, and at least one profile returned by `hermes profile list`.
 - **Hermes v0.20.0:** open Agent Dock from the status bar or Command Palette. Pet-click activation requires a newer host that exposes `pet.actions`.
 - **Not claimed as verified in this release:** macOS or Linux installation. The installer is stdlib-only and platform-aware, but those operating systems still need direct release QA.
@@ -31,15 +31,15 @@ Agent Dock is for people who already use more than one Hermes profile and want t
    hermes profile list
    ```
 
-2. Install the exact v0.3.0 release:
+2. Install the exact v0.4.0 release:
 
    ```bash
-   git clone --branch v0.3.0 --depth 1 https://github.com/BkashJEE/hermes-agent-dock.git
+   git clone --branch v0.4.0 --depth 1 https://github.com/BkashJEE/hermes-agent-dock.git
    cd hermes-agent-dock
    python install.py
    ```
 
-3. Confirm the inventory contains `enabled user 0.3.0 hermes-agent-dock`:
+3. Confirm the inventory contains `enabled user 0.4.0 hermes-agent-dock`:
 
    ```bash
    hermes plugins list --plain --no-bundled
@@ -164,7 +164,7 @@ No npm, pip, post-install hook, admin elevation, or package lifecycle script is 
 
 Instead of rebuilding or adapting Agent Dock, give your Hermes agent the verified release and ask it to install the exact published files:
 
-> Install Hermes Agent Dock v0.3.0 from https://github.com/BkashJEE/hermes-agent-dock for my current Hermes home. Do not recreate, rewrite, or expand the project. Inspect the release README, SECURITY.md, LICENSE, THIRD_PARTY_NOTICES.md, and `proof/control-plane-verification.json`; confirm the repository, `v0.3.0` tag, and version metadata; run the documented tests; run `python install.py`; verify `hermes plugins list --plain --no-bundled` reports `hermes-agent-dock` enabled at v0.3.0; compare the six runtime files with the hashes in the local install manifest; and report the exact result plus whether Hermes Desktop must restart. Do not read or copy conversation content, memories, credentials, or unrelated files, and do not modify any existing profile, model, provider, tool, or approval policy.
+> Install Hermes Agent Dock v0.4.0 from https://github.com/BkashJEE/hermes-agent-dock for my current Hermes home. Do not recreate, rewrite, or expand the project. Inspect the release README, SECURITY.md, LICENSE, THIRD_PARTY_NOTICES.md, and `proof/control-plane-verification.json`; confirm the repository, `v0.4.0` tag, and version metadata; run the documented tests; run `python install.py`; verify `hermes plugins list --plain --no-bundled` reports `hermes-agent-dock` enabled at v0.4.0; compare the six runtime files with the hashes in the local install manifest; and report the exact result plus whether Hermes Desktop must restart. Do not read or copy conversation content, memories, credentials, or unrelated files, and do not modify any existing profile, model, provider, tool, or approval policy.
 
 This is an install-and-verify workflow, not a code-generation prompt. The published installer keeps a timestamped rollback backup and restores the previous desktop and backend components if replacement fails.
 
@@ -298,7 +298,7 @@ Read [CONTRIBUTING.md](CONTRIBUTING.md) before submitting. It defines the focuse
 - Public SDK support for durable backend job persistence across a full Desktop process restart.
 - Authorized cross-channel profile continuity: channel-specific transcripts with shared durable profile context and task state, plus explicit exact-session handoff between Telegram, Agent Dock, and future surfaces.
 
-## Known limitations in v0.3.0
+## Known limitations in v0.4.0
 
 - Responses appear after bounded background polling; token-by-token streaming is not available.
 - Hermes-native floating panes can move, collapse, and remember their host-owned position, but Agent Dock does not claim arbitrary freeform resizing.
