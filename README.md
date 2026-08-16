@@ -128,7 +128,7 @@ metadata only and never persists prompt, response, or image bytes.
 **Assign-after** requires a `message` (the task text for the card; the ledger
 stores no prompt). It is idempotent: the idempotency key is the stable job ID,
 so a repeat returns the existing card instead of creating a duplicate. Active
-jobs are rejected with `409`.
+jobs are rejected with `409`; an unavailable Kanban board is `503`.
 
 **Retry** requires a `message` and re-validates model/provider/session against
 the profile catalog. The job ID, profile, and `request_id` are preserved — a
