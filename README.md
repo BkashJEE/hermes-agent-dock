@@ -108,7 +108,33 @@ The selected profile keeps its existing tools, memory, model/provider configurat
 - Reconciles profile-local durable job reservations after restart without
   relaunching uncertain work, and requires explicit exact-runtime reattachment.
 - Uses compact attachment chips and assistant-only Copy; history retains neither
-  image bytes nor private source paths, and the Dock intentionally has no Retry.
+  image bytes nor private source paths. A bounded **Retry** endpoint re-runs a
+  terminal job under its stable identity; a **Ledger** endpoint lists durable
+  jobs; and **Assign-after** links a finished job to the Kanban board without
+  re-running it.
+
+## Job management API
+
+The backend exposes a small, local, same-origin API for managing durable jobs
+after the fact. All endpoints are privacy-reduced: the durable ledger stores
+metadata only and never persists prompt, response, or image bytes.
+
+| Method & path | Purpose | Returns |
+| --- | --- | --- |
+| `GET /jobs?limit=N` | List durable jobs, newest first, bounded (default 50, max 200) | `{ jobs: [...], count: N }` |
+| `POST /jobs/{id}/assign` | Link a terminal job to the `executive-organization` Kanban board without re-running it | `201` + public job |
+| `POST /jobs/{id}/retry` | Re-run a terminal job under its stable identity with a fresh attempt | `202` + public job |
+
+**Assign-after** requires a `message` (the task text for the card; the ledger
+stores no prompt). It is idempotent: the idempotency key is the stable job ID,
+so a repeat returns the existing card instead of creating a duplicate. Active
+jobs are rejected with `409`; an unavailable Kanban board is `503`.
+
+**Retry** requires a `message` and re-validates model/provider/session against
+the profile catalog. The job ID, profile, and `request_id` are preserved — a
+retry is the same logical job run again, not a new job. It respects the
+four-active-session cap (`429` when full) and only accepts terminal jobs
+(`409` while active).
 
 ## Important boundaries
 
