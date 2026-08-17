@@ -208,7 +208,9 @@ class BackendSecurityTests(unittest.TestCase):
 
     def test_reasoning_and_fast_are_capability_gated(self):
         with self.validation():
-            api._build_command(self.request(reasoning_effort="ultra"))
+            # xhigh is supported by both the installed Hermes constants package
+            # and the current Hermes source tree used by Agent Dock.
+            api._build_command(self.request(reasoning_effort="xhigh"))
             api._build_command(self.request(fast=True))
             with self.assertRaisesRegex(ValueError, "Invalid reasoning effort"):
                 api._build_command(self.request(reasoning_effort="extreme"))
