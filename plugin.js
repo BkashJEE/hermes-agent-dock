@@ -655,6 +655,93 @@ function receiptLabel(state) {
     superseded: 'Superseded'
   })[state] || 'Unverified'
 }
+
+// ── Job Ledger (durable job list + assign-after + retry) — dependency-free ──
+// Mirrors backend/dashboard/plugin_api.py: GET /jobs, POST /jobs/{id}/assign,
+// POST /jobs/{id}/retry. The ledger never stores prompts; retry/assign take
+// a client-supplied message. These helpers are pure so the UI can be unit
+// tested without the host/React runtime.
+const LEDGER_ACTIVE_STATUSES = Object.freeze(['starting', 'queued', 'running', 'finalizing', 'cancelling'])
+const LEDGER_TERMINAL_STATUSES = Object.freeze(['done', 'error', 'cancelled', 'interrupted'])
+
+function ledgerStatusTone(status) {
+  if (LEDGER_ACTIVE_STATUSES.includes(status)) return 'active'
+  if (status === 'done') return 'success'
+  if (status === 'error') return 'error'
+  if (status === 'cancelled' || status === 'interrupted') return 'muted'
+  return 'neutral'
+}
+
+function ledgerStatusLabel(status) {
+  return ({
+    starting: 'Starting',
+    queued: 'Queued',
+    running: 'Running',
+    finalizing: 'Finalizing',
+    cancelling: 'Cancelling',
+    done: 'Done',
+    error: 'Failed',
+    cancelled: 'Cancelled',
+    interrupted: 'Interrupted'
+  })[status] || (status ? String(status) : 'Unknown')
+}
+
+function ledgerIsAssignable(job) {
+  return Boolean(job && LEDGER_TERMINAL_STATUSES.includes(job.status) && !job.kanban_task_id)
+}
+
+function ledgerIsRetryable(job) {
+  return Boolean(job && LEDGER_TERMINAL_STATUSES.includes(job.status))
+}
+
+function ledgerRow(job) {
+  const status = job && job.status ? String(job.status) : ''
+  return {
+    id: job?.id || '',
+    profile: job?.profile || 'unknown',
+    status,
+    statusLabel: ledgerStatusLabel(status),
+    tone: ledgerStatusTone(status),
+    canAssign: ledgerIsAssignable(job),
+    canRetry: ledgerIsRetryable(job),
+    assigned: Boolean(job?.kanban_task_id),
+    board: job?.kanban_board || '',
+    error: typeof job?.error === 'string' ? job.error : '',
+    createdAt: Number(job?.created_at) || null,
+    finishedAt: Number(job?.finished_at) || null
+  }
+}
+
+function ledgerTimestampLabel(value, now = Date.now()) {
+  if (!value) return '—'
+  const ms = value < 1e12 ? value * 1000 : value
+  const diff = now - ms
+  if (diff < 60_000) return 'just now'
+  if (diff < 3_600_000) return `${Math.floor(diff / 60_000)}m ago`
+  if (diff < 86_400_000) return `${Math.floor(diff / 3_600_000)}h ago`
+  return new Date(ms).toLocaleDateString()
+}
+
+function ledgerRetryPayload(job, message) {
+  // Re-run under the stable identity with the job's own config; drop session_id
+  // so a retry is a fresh attempt rather than a continuation of prior context.
+  const body = { message: String(message || '').trim() }
+  const provider = typeof job?.provider === 'string' && job.provider ? job.provider : undefined
+  const model = typeof job?.model === 'string' && job.model ? job.model : undefined
+  const reasoning_effort = typeof job?.reasoning_effort === 'string' && job.reasoning_effort ? job.reasoning_effort : undefined
+  if (provider) body.provider = provider
+  if (model) body.model = model
+  if (reasoning_effort) body.reasoning_effort = reasoning_effort
+  body.fast = job?.fast === true
+  return body
+}
+
+function ledgerErrorMessage(action, error) {
+  const detail = error && (error.detail || error.message)
+  const raw = typeof detail === 'string' && detail ? detail : String(error || 'unknown error')
+  const verb = action === 'assign' ? 'Assign' : 'Retry'
+  return `${verb} failed: ${raw.slice(0, 160)}`
+}
 // STATE_HELPERS_END
 
 function makeRequestId() {
@@ -1223,6 +1310,195 @@ function RoutineRow({ job, busy, onAction }) {
             children: 'Paused for security: delete and recreate this legacy routine before running it again.'
           })
         : null
+    ]
+  })
+}
+
+function JobLedgerPanel({ profiles = [] }) {
+  const [busy, setBusy] = useState(false)
+  const [actionFor, setActionFor] = useState(null)
+  const [messageFor, setMessageFor] = useState(null)
+  const [message, setMessage] = useState('')
+  const [refreshing, setRefreshing] = useState(false)
+
+  const query = useQuery({
+    queryKey: ['agent-dock', 'job-ledger'],
+    queryFn: () => rest('/jobs?limit=50'),
+    refetchInterval: 15000
+  })
+  const jobs = Array.isArray(query.data?.jobs) ? query.data.jobs : []
+
+  const refresh = async () => {
+    if (refreshing) return
+    setRefreshing(true)
+    try {
+      await query.refetch()
+    } catch {
+      // surface via query.isError in render
+    } finally {
+      setRefreshing(false)
+    }
+  }
+
+  const closeComposer = () => {
+    setActionFor(null)
+    setMessageFor(null)
+    setMessage('')
+  }
+
+  const confirmAction = async (row, action) => {
+    const text = message.trim()
+    if (busy || !text) return
+    setBusy(true)
+    try {
+      if (action === 'assign') {
+        await rest(`/jobs/${encodeURIComponent(row.id)}/assign`, { method: 'POST', body: { message: text } })
+        host.notify({ kind: 'success', message: `Assigned ${row.profile} job to Kanban.` })
+      } else {
+        await rest(`/jobs/${encodeURIComponent(row.id)}/retry`, { method: 'POST', body: ledgerRetryPayload(row, text) })
+        host.notify({ kind: 'success', message: `Retry dispatched for ${row.profile} job.` })
+      }
+      closeComposer()
+      await query.refetch()
+    } catch (error) {
+      host.notify({ kind: 'error', message: ledgerErrorMessage(action, error) })
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const toneClass = {
+    active: 'bg-(--ui-accent)',
+    success: 'bg-emerald-500',
+    error: 'bg-red-500',
+    muted: 'bg-(--ui-text-quaternary)',
+    neutral: 'bg-(--ui-text-quaternary)'
+  }
+
+  return jsxs('div', {
+    className: 'space-y-2',
+    'data-agent-dock-ledger': 'true',
+    children: [
+      jsxs('div', {
+        className: 'flex items-center gap-1.5',
+        children: [
+          jsx(Codicon, { name: 'tasklist', size: '0.82rem' }),
+          jsx('span', {
+            className: 'text-xs font-semibold',
+            children: `Job Ledger (${jobs.length})`
+          }),
+          jsx('span', { className: 'ml-auto text-[0.6rem] text-(--ui-text-tertiary)', children: 'privacy-reduced · no prompts stored' }),
+          jsx('button', {
+            'aria-label': 'Refresh job ledger',
+            className: 'flex size-5 items-center justify-center rounded text-(--ui-text-quaternary) hover:bg-(--chrome-action-hover) hover:text-foreground',
+            onClick: refresh,
+            title: 'Refresh',
+            type: 'button',
+            children: jsx(Codicon, { name: refreshing ? 'loading' : 'refresh', className: 'text-[0.72rem]' + (refreshing ? ' animate-spin' : '') })
+          })
+        ]
+      }),
+      query.isPending
+        ? jsx('p', { className: 'rounded-md border border-(--ui-stroke-secondary) px-2 py-1.5 text-[0.64rem] text-(--ui-text-tertiary)', children: 'Loading ledger…' })
+        : query.isError
+          ? jsx('p', { className: 'rounded-md border border-(--ui-stroke-secondary) px-2 py-1.5 text-[0.64rem] text-(--ui-danger)', children: 'Ledger unavailable: ' + (String(query.error?.detail || query.error?.message || query.error || 'unknown').slice(0, 120)) })
+          : jobs.length
+            ? jsx('ul', {
+                className: 'space-y-1.5',
+                role: 'list',
+                children: jobs.map(job => {
+                  const row = ledgerRow(job)
+                  const active = actionFor === row.id
+                  return jsx('li', {
+                    key: row.id,
+                    className: 'grid gap-1.5 rounded-lg border border-(--ui-stroke-secondary) p-2',
+                    children: [
+                      jsxs('div', {
+                        className: 'flex items-center gap-2',
+                        children: [
+                          jsx('span', { 'aria-hidden': true, className: cn('size-1.5 shrink-0 rounded-full', toneClass[row.tone] || toneClass.neutral) }),
+                          jsx('span', { className: 'min-w-0 flex-1 truncate text-xs font-medium', children: profileDisplayLabel(row.profile) }),
+                          jsx('span', { className: 'text-[0.6rem] text-(--ui-text-quaternary)', children: ledgerTimestampLabel(row.createdAt) })
+                        ]
+                      }),
+                      jsxs('div', {
+                        className: 'flex items-center justify-between gap-2 pl-3.5',
+                        children: [
+                          jsx('span', {
+                            className: 'inline-flex items-center gap-1 rounded-full border border-(--ui-stroke-secondary) px-1.5 py-0.5 text-[0.62rem] text-(--ui-text-tertiary)',
+                            children: [
+                              jsx(Codicon, { name: row.assigned ? 'kanban' : 'tasklist', className: 'text-[0.66rem]' }),
+                              row.statusLabel + (row.assigned ? ' · on Kanban' : '')
+                            ]
+                          }),
+                          jsxs('div', {
+                            className: 'flex items-center gap-1',
+                            children: [
+                              row.canAssign
+                                ? jsx('button', {
+                                    'aria-label': `Assign ${row.profile} job to Kanban`,
+                                    className: 'rounded px-1.5 py-0.5 text-[0.62rem] text-(--ui-text-tertiary) hover:bg-(--chrome-action-hover) hover:text-foreground',
+                                    onClick: () => { setActionFor(active ? null : row.id); setMessageFor('assign'); if (!active) setMessage('') },
+                                    title: 'Assign to Kanban',
+                                    type: 'button',
+                                    children: 'Assign'
+                                  })
+                                : null,
+                              row.assigned
+                                ? jsx('span', { className: 'text-[0.6rem] text-emerald-500', children: '✓ Kanban' })
+                                : null,
+                              row.canRetry
+                                ? jsx('button', {
+                                    'aria-label': `Retry ${row.profile} job`,
+                                    className: 'rounded px-1.5 py-0.5 text-[0.62rem] text-(--ui-text-tertiary) hover:bg-(--chrome-action-hover) hover:text-foreground',
+                                    onClick: () => { setActionFor(active ? null : row.id); setMessageFor('retry'); if (!active) setMessage('') },
+                                    title: 'Retry',
+                                    type: 'button',
+                                    children: 'Retry'
+                                  })
+                                : null
+                            ]
+                          })
+                        ]
+                      }),
+                      row.error
+                        ? jsx('div', { className: 'rounded-md border border-(--ui-stroke-secondary) px-2 py-1 text-[0.62rem] leading-4 text-(--ui-danger)', children: row.error.slice(0, 160) })
+                        : null,
+                      active
+                        ? jsxs('div', {
+                            className: 'grid gap-1.5',
+                            children: [
+                              jsx(Textarea, {
+                                'aria-label': `Message for ${messageFor} on ${row.profile} job`,
+                                className: 'min-h-14 text-[0.7rem]',
+                                onChange: event => setMessage(event.target.value),
+                                placeholder: messageFor === 'assign'
+                                  ? 'Task to place on Kanban (message is client-side; not stored in ledger)'
+                                  : 'Message to re-send on retry (fresh attempt, same job identity)',
+                                value: message
+                              }),
+                              jsxs('div', {
+                                className: 'flex items-center justify-end gap-2',
+                                children: [
+                                  jsx('button', { className: 'text-[0.66rem] text-(--ui-text-tertiary) hover:text-foreground', onClick: closeComposer, type: 'button', children: 'Cancel' }),
+                                  jsx('button', {
+                                    className: 'rounded-md border border-(--ui-stroke-secondary) bg-(--ui-control-hover-background) px-2.5 py-1 text-[0.68rem] font-medium hover:bg-(--chrome-action-hover) disabled:opacity-50',
+                                    disabled: busy || !message.trim(),
+                                    onClick: () => confirmAction(row, messageFor),
+                                    title: `${messageFor === 'assign' ? 'Assign' : 'Retry'} this job`,
+                                    type: 'button',
+                                    children: busy ? 'Working…' : (messageFor === 'assign' ? 'Confirm assign' : 'Confirm retry')
+                                  })
+                                ]
+                              })
+                            ]
+                          })
+                        : null
+                    ]
+                  }, row.id)
+                })
+              })
+            : jsx('p', { className: 'rounded-md border border-(--ui-stroke-secondary) px-2 py-1.5 text-[0.64rem] text-(--ui-text-tertiary)', children: 'No jobs yet. Send a message to an agent to start one.' })
     ]
   })
 }
@@ -2031,6 +2307,7 @@ function AgentDock({ mode = DEFAULT_DOCK_MODE, onToggleMode }) {
   const [subagentsByProfile, setSubagentsByProfile] = useState(() => storage.get('subagent-runs', {}))
   const [expandedSubagents, setExpandedSubagents] = useState({})
   const [muted, setMuted] = useState(() => storage.get('muted', false))
+  const [ledgerOpen, setLedgerOpen] = useState(false)
   const [achievementToast, setAchievementToast] = useState(null)
   const [modelMenuPanel, setModelMenuPanel] = useState('advanced')
   const scrollRef = useRef(null)
@@ -2957,6 +3234,22 @@ function AgentDock({ mode = DEFAULT_DOCK_MODE, onToggleMode }) {
                 children: dockAction
               }),
               jsx('button', {
+                'aria-label': ledgerOpen ? 'Hide job ledger' : 'Show job ledger',
+                'aria-pressed': ledgerOpen,
+                className: 'flex h-6 shrink-0 items-center gap-1 rounded-md px-1.5 text-[0.62rem] font-medium text-(--ui-text-tertiary) hover:bg-(--ui-control-hover-background) hover:text-foreground',
+                'data-agent-dock-ledger-toggle': 'true',
+                onClick: () => {
+                  haptic('tap')
+                  setLedgerOpen(open => !open)
+                },
+                title: 'Job ledger (assign / retry)',
+                type: 'button',
+                children: [
+                  jsx(Codicon, { name: ledgerOpen ? 'close' : 'tasklist', size: '0.72rem' }),
+                  jsx('span', { children: ledgerOpen ? 'Close ledger' : 'Ledger' })
+                ]
+              }),
+              jsx('button', {
                 'aria-label': muted ? 'Enable achievement sound' : 'Mute achievement sound',
                 className: 'grid size-7 place-items-center rounded-md text-(--ui-text-tertiary) hover:bg-(--ui-control-hover-background) hover:text-foreground',
                 onClick: () => {
@@ -3449,6 +3742,9 @@ function AgentDock({ mode = DEFAULT_DOCK_MODE, onToggleMode }) {
                 jsx('span', { className: 'ml-auto truncate text-[0.61rem] text-(--ui-text-quaternary)', children: agentHeading }, 'heading')
               ]
       }),
+      ledgerOpen
+        ? jsx(JobLedgerPanel, {})
+        : null,
       jsxs('div', {
             className: 'flex min-h-0 flex-1 flex-col',
             children: [

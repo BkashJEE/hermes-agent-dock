@@ -53,7 +53,15 @@ const exported = [
   'validateImageFileMetadata',
   'workingProfileNames',
   'normalizeSubagents',
-  'updateProfileSubagents'
+  'updateProfileSubagents',
+  'ledgerStatusTone',
+  'ledgerStatusLabel',
+  'ledgerIsAssignable',
+  'ledgerIsRetryable',
+  'ledgerRow',
+  'ledgerTimestampLabel',
+  'ledgerRetryPayload',
+  'ledgerErrorMessage'
 ].join(', ')
 const state = await import(`data:text/javascript;base64,${Buffer.from(`${helpers}\nexport { ${exported} }`).toString('base64')}`)
 
@@ -330,7 +338,12 @@ test('message cards use a compact footer, expose assistant Copy, and show sent i
   assert.match(pluginSource, /attachmentDisplayName\(item\.name\)/)
   assert.match(pluginSource, /children: `\$\{attachmentCount\} image\$\{attachmentCount === 1 \? '' : 's'\}`/)
   assert.doesNotMatch(pluginSource, /children: `Images ·/)
-  assert.doesNotMatch(pluginSource, /children:\s*['"]Retry['"]/i)
+  // The job-ledger UI legitimately exposes a "Retry" action — that is a real
+  // backend feature, not a fake button.  So the "no fake retry" guard must be
+  // scoped to the MessageBubble card only, not the whole source.
+  const messageBubbleSegment = (pluginSource.match(/function MessageBubble\(\{[^]*?(?=\nfunction [A-Z])/) || [''])[0]
+  assert.equal(messageBubbleSegment.includes("children: 'Retry'"), false)
+  assert.equal(messageBubbleSegment.includes('children: "Retry"'), false)
 
   const optimisticSegment = pluginSource.match(/const optimistic = \{[^]*?append\(profile, optimistic\)/)?.[0]
   assert.ok(optimisticSegment, 'optimistic history append must remain present')
@@ -746,4 +759,90 @@ test('plugin registers floating and docked PANES_AREA modes plus pet, status-bar
   assert.doesNotMatch(pluginSource, /aria-label': 'Enable fast mode'/)
   assert.doesNotMatch(pluginSource, /--chrome-background/)
   assert.doesNotMatch(pluginSource, /--ui-control-background/)
+})
+
+// ── Job Ledger UI (assign-after / retry) — pure helpers, contract-locked ────
+test('job-ledger status tones map terminal and active states to exact visual buckets', () => {
+  assert.equal(state.ledgerStatusTone('running'), 'active')
+  assert.equal(state.ledgerStatusTone('queued'), 'active')
+  assert.equal(state.ledgerStatusTone('finalizing'), 'active')
+  assert.equal(state.ledgerStatusTone('done'), 'success')
+  assert.equal(state.ledgerStatusTone('error'), 'error')
+  assert.equal(state.ledgerStatusTone('cancelled'), 'muted')
+  assert.equal(state.ledgerStatusTone('interrupted'), 'muted')
+  assert.equal(state.ledgerStatusTone('weird'), 'neutral')
+  assert.equal(state.ledgerStatusTone(undefined), 'neutral')
+})
+
+test('job-ledger row flags assign/retry exactly per the backend status contract', () => {
+  // Terminal + not-yet-assigned → assignable and retryable
+  assert.deepEqual(
+    { assign: state.ledgerIsAssignable({ status: 'done' }), retry: state.ledgerIsRetryable({ status: 'done' }) },
+    { assign: true, retry: true }
+  )
+  // Terminal but already on Kanban → no longer assignable (idempotent), still retryable
+  assert.equal(state.ledgerIsAssignable({ status: 'error', kanban_task_id: 'kb-1' }), false)
+  assert.equal(state.ledgerIsRetryable({ status: 'error', kanban_task_id: 'kb-1' }), true)
+  // Active → neither assignable nor retryable
+  assert.equal(state.ledgerIsAssignable({ status: 'running' }), false)
+  assert.equal(state.ledgerIsRetryable({ status: 'running' }), false)
+  // null / malformed rows are safe
+  assert.equal(state.ledgerIsAssignable(null), false)
+  assert.equal(state.ledgerIsRetryable(undefined), false)
+  // ledgerRow derives a stable public view without leaking internal fields
+  const row = state.ledgerRow({ id: 'j1', profile: 'jarvis', status: 'done', kanban_task_id: 'kb', board: 'board', error: '', created_at: 10, finished_at: 20, _secret: 'x', _progress_path: '/p' })
+  assert.equal(row.id, 'j1')
+  assert.equal(row.statusLabel, 'Done')
+  assert.equal(row.tone, 'success')
+  assert.equal(row.assigned, true)
+  assert.equal(row.canAssign, false)
+  assert.equal(row.canRetry, true)
+  assert.equal('_secret' in row, false)
+  assert.equal('_progress_path' in row, false)
+})
+
+test('job-ledger retry payload re-runs under the stable identity and drops session context', () => {
+  const job = { id: 'j', profile: 'jarvis', provider: 'openai-codex', model: 'gpt-5.6-terra', reasoning_effort: 'high', fast: true, session_id: 'abc', request_id: 'r1' }
+  const body = state.ledgerRetryPayload(job, '  please retry  ')
+  assert.equal(body.message, 'please retry')
+  assert.equal(body.provider, 'openai-codex')
+  assert.equal(body.model, 'gpt-5.6-terra')
+  assert.equal(body.reasoning_effort, 'high')
+  assert.equal(body.fast, true)
+  // session_id and request_id must NOT be sent — retry is a fresh attempt
+  assert.equal('session_id' in body, false)
+  assert.equal('request_id' in body, false)
+  // minimal job → only the message
+  assert.deepEqual(state.ledgerRetryPayload({ id: 'x', status: 'error' }, 'go'), { message: 'go', fast: false })
+})
+
+test('job-ledger error messages surface the backend detail with the right verb and a bound length', () => {
+  assert.match(state.ledgerErrorMessage('assign', { detail: 'Kanban assignment failed' }), /^Assign failed: Kanban assignment failed/)
+  assert.match(state.ledgerErrorMessage('retry', { detail: 'Job is still active' }), /^Retry failed: Job is still active/)
+  assert.match(state.ledgerErrorMessage('retry', 'raw string'), /^Retry failed: raw string/)
+  // bound to 160 chars of detail
+  const longDetail = 'x'.repeat(500)
+  assert.equal(state.ledgerErrorMessage('retry', { detail: longDetail }).length, `Retry failed: `.length + 160)
+})
+
+test('job-ledger panel is wired to the backend contract and ships the privacy note', () => {
+  assert.match(pluginSource, /function JobLedgerPanel\(\{ profiles = \[\] \}\)/)
+  // list
+  assert.match(pluginSource, /queryKey: \['agent-dock', 'job-ledger'\]/)
+  assert.match(pluginSource, /queryFn: \(\) => rest\('\/jobs\?limit=50'\)/)
+  // assign-after → POST /jobs/{id}/assign with client-side message
+  assert.match(pluginSource, /`\/jobs\/\$\{encodeURIComponent\(row\.id\)\}\/assign`/);
+  assert.match(pluginSource, /body: \{ message: text \}/)
+  // retry → POST /jobs/{id}/retry with the stable-identity payload
+  assert.match(pluginSource, /`\/jobs\/\$\{encodeURIComponent\(row\.id\)\}\/retry`/)
+  assert.match(pluginSource, /body: ledgerRetryPayload\(row, text\)/)
+  // header toggle + accessibility
+  assert.match(pluginSource, /'data-agent-dock-ledger-toggle': 'true'/)
+  assert.match(pluginSource, /'aria-pressed': ledgerOpen/)
+  // privacy invariant surfaced in the UI
+  assert.match(pluginSource, /privacy-reduced · no prompts stored/)
+  // the message composer explicitly tells the user the message is client-side
+  assert.match(pluginSource, /message is client-side; not stored in ledger/)
+  // mounted in AgentDock only when toggled open
+  assert.match(pluginSource, /ledgerOpen\s*\n\s*\? jsx\(JobLedgerPanel, \{\}\)\s*\n\s*: null/)
 })
