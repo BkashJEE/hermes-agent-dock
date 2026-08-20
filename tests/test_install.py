@@ -50,6 +50,7 @@ class InstallLifecycleTests(unittest.TestCase):
             first = install_module.install(home, copy_only=True)
             self.assertTrue((home / "desktop-plugins" / "hermes-agent-dock" / "plugin.js").is_file())
             self.assertTrue((home / "plugins" / "hermes-agent-dock" / "dashboard" / "plugin_api.py").is_file())
+            self.assertTrue((home / "plugins" / "hermes-agent-dock" / "dashboard" / "capability_center.py").is_file())
             self.assertTrue((home / "plugins" / "hermes-agent-dock" / "dashboard" / "dock_runner.py").is_file())
             self.assertTrue((home / "plugins" / "hermes-agent-dock" / "dashboard" / "control_store.py").is_file())
             self.assertTrue((home / "plugins" / "hermes-agent-dock" / "dashboard" / "job_store.py").is_file())
@@ -59,6 +60,7 @@ class InstallLifecycleTests(unittest.TestCase):
                 "backend/plugin.yaml",
                 "backend/dashboard/manifest.json",
                 "backend/dashboard/plugin_api.py",
+                "backend/dashboard/capability_center.py",
                 "backend/dashboard/dock_runner.py",
                 "backend/dashboard/control_store.py",
                 "backend/dashboard/job_store.py",

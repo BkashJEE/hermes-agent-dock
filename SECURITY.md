@@ -5,6 +5,8 @@ Hermes Agent Dock is a local Hermes Desktop extension. It does not add telemetry
 ## Security boundaries
 
 - The backend accepts only profile names returned by Hermes' own profile registry.
+- Capability scans run in a short-lived child process scoped to that exact profile. Responses never include credential values, MCP commands or arguments, mounts, forwarded environment values, or filesystem paths.
+- Execution-target writes accept only `host` or `docker`, require an exact JSON boolean confirmation, use Hermes' config writer, and apply only to new sessions. Enabling Docker fails closed if privileged Docker-only settings are already present; the Dock exposes only boolean risk categories, never their values.
 - Agent launches use a fixed runner argument vector with `shell=False`; the exact request is delivered as JSON over `stdin=subprocess.PIPE`, never interpolated into a shell command.
 - The plugin never adds `--yolo`, automatic hook approval, or a permission bypass.
 - Pet toggling uses only the public `pet.actions` contribution registry. The plugin does not query private pet markup, install document-level pointer interception, or override native drag/Shift-click behavior; older hosts safely ignore the optional contribution.

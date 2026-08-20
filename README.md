@@ -4,7 +4,7 @@ A native Hermes Desktop floating card by default for direct chat with configured
 
 > Community project. Not an official Nous Research release.
 
-**Release candidate:** v0.4.0 · [Security policy](SECURITY.md) · [Third-party notices](THIRD_PARTY_NOTICES.md)
+**Release candidate:** v0.5.0 · [Security policy](SECURITY.md) · [Third-party notices](THIRD_PARTY_NOTICES.md)
 
 <p align="center">
   <img src="docs/assets/agent-dock-dark-cover.png" alt="Dark conceptual workflow illustration showing a busy Hermes orchestrator and direct Agent Dock paths to researcher, builder, reviewer, and vision specialists" width="100%">
@@ -18,10 +18,10 @@ Agent Dock is for people who already use more than one Hermes profile and want t
 
 ### Compatibility at a glance
 
-- **Verified:** Windows 10, Hermes Desktop, and the v0.4.0 release tests documented below.
+- **Verified:** Windows 10 with Hermes Desktop, plus the v0.5.0 automated suite on hosted Windows, macOS, and Ubuntu runners.
 - **Required:** Hermes Agent with Hermes Desktop, Python 3.10+, and at least one profile returned by `hermes profile list`.
 - **Hermes v0.20.0:** open Agent Dock from the status bar or Command Palette. Pet-click activation requires a newer host that exposes `pet.actions`.
-- **Not claimed as verified in this release:** macOS or Linux installation. The installer is stdlib-only and platform-aware, but those operating systems still need direct release QA.
+- **Not claimed as directly verified in this release:** Hermes Desktop UI behavior on macOS or Linux. Installation and the full automated suite run on hosted macOS, Windows, and Ubuntu, but native Desktop release QA is still separate.
 
 ### Five-minute setup
 
@@ -31,15 +31,15 @@ Agent Dock is for people who already use more than one Hermes profile and want t
    hermes profile list
    ```
 
-2. Install the exact v0.4.0 release:
+2. Install the exact v0.5.0 release after it is tagged:
 
    ```bash
-   git clone --branch v0.4.0 --depth 1 https://github.com/BkashJEE/hermes-agent-dock.git
+   git clone --branch v0.5.0 --depth 1 https://github.com/BkashJEE/hermes-agent-dock.git
    cd hermes-agent-dock
    python install.py
    ```
 
-3. Confirm the inventory contains `enabled user 0.4.0 hermes-agent-dock`:
+3. Confirm the inventory contains `enabled user 0.5.0 hermes-agent-dock`:
 
    ```bash
    hermes plugins list --plain --no-bundled
@@ -86,6 +86,8 @@ The selected profile keeps its existing tools, memory, model/provider configurat
 - Adds a compact Hermes-themed contribution as a floating card by default (`placement: 'floating'`, `anchor: 'top-right'`, `380px × 540px`) and reuses the official BrandMark already bundled with the host app.
 - The card's **Dock**/**Undock** control switches only between supported public `PANES_AREA` contributions: floating mode stays above the workspace; docked mode uses the native bottom workspace tile and divider, reflowing Browser and the main workspace while Files remains independent.
 - Discovers actual Hermes profiles; it does not invent agents or pretend one profile is every specialist.
+- Adds a profile-scoped **Capability Center** for the selected Hermes profile: effective provider/model, configured/not-configured provider credential state, installed skills, enabled toolsets, MCP server names, approval gates, and the execution target. Credential values, MCP commands, mounts, paths, and forwarded environment values are never returned.
+- Lets an operator explicitly choose **Host** or **Docker** for new sessions. Docker is disabled until its executable is available; a Host-to-Docker change also fails closed when dormant mounts, environment forwarding, extra arguments, or persistence settings require review in Hermes. Changing the target requires confirmation and never migrates an already-running session.
 - Uses a compact agent picker and a model selector populated from the selected profile's configured/authenticated Hermes provider. It exposes that provider's available alternatives—not an unrelated global provider catalog—and labels each model with a deterministic **Workload tier**.
 - Starts or resumes a profile-scoped Hermes session without routing through the focused orchestrator.
 - Discovers real live sessions for the Desktop's current runtime profile through `session.active_list` and lets the operator explicitly attach the Dock to one stable session/run binding without restarting it.
@@ -190,13 +192,13 @@ No npm, pip, post-install hook, admin elevation, or package lifecycle script is 
 
 Instead of rebuilding or adapting Agent Dock, give your Hermes agent the verified release and ask it to install the exact published files:
 
-> Install Hermes Agent Dock v0.4.0 from https://github.com/BkashJEE/hermes-agent-dock for my current Hermes home. Do not recreate, rewrite, or expand the project. Inspect the release README, SECURITY.md, LICENSE, THIRD_PARTY_NOTICES.md, and `proof/control-plane-verification.json`; confirm the repository, `v0.4.0` tag, and version metadata; run the documented tests; run `python install.py`; verify `hermes plugins list --plain --no-bundled` reports `hermes-agent-dock` enabled at v0.4.0; compare the six runtime files with the hashes in the local install manifest; and report the exact result plus whether Hermes Desktop must restart. Do not read or copy conversation content, memories, credentials, or unrelated files, and do not modify any existing profile, model, provider, tool, or approval policy.
+> Install Hermes Agent Dock v0.5.0 from https://github.com/BkashJEE/hermes-agent-dock for my current Hermes home. Do not recreate, rewrite, or expand the project. Inspect the release README, SECURITY.md, LICENSE, THIRD_PARTY_NOTICES.md, and `proof/control-plane-verification.json`; confirm the repository, `v0.5.0` tag, and version metadata; run the documented tests; run `python install.py`; verify `hermes plugins list --plain --no-bundled` reports `hermes-agent-dock` enabled at v0.5.0; compare the runtime files with the hashes in the local install manifest; and report the exact result plus whether Hermes Desktop must restart. Do not read or copy conversation content, memories, credentials, or unrelated files, and do not modify any existing profile, model, provider, tool, approval policy, or execution target without a separate explicit confirmation.
 
 This is an install-and-verify workflow, not a code-generation prompt. The published installer keeps a timestamped rollback backup and restores the previous desktop and backend components if replacement fails.
 
 ### Existing-agent discovery and privacy
 
-Agent Dock does not crawl the user's Hermes workspace. Its backend calls Hermes's official `hermes_cli.profiles.list_profiles()` inventory and reads only the profile name, default-profile status, gateway status, saved model/provider, and bounded description. It does not enumerate conversation bodies, prompts, memories, skills, credentials, or arbitrary profile files.
+Agent Dock does not crawl the user's Hermes workspace. Its backend calls Hermes's official profile and configuration APIs. The Capability Center launches a short-lived process scoped to the selected profile and enumerates only skill markers under that profile's `skills` directory plus allowlisted configuration metadata. It does not enumerate conversation bodies, prompts, memories, credential values, MCP commands/arguments, mounts, forwarded environment values, or arbitrary profile files.
 
 The picker shows the profiles already configured on that Hermes installation. Selecting one starts or resumes a session under that profile's isolated Hermes home, so the profile keeps its existing tools, policies, memory, model configuration, and approval gates. Agent Dock does not create, merge, or silently reconfigure agents.
 
@@ -296,7 +298,8 @@ python -m py_compile backend/dashboard/plugin_api.py backend/dashboard/control_s
 
 - `plugin.js` — build-free Hermes Desktop ESM runtime.
 - `backend/plugin.yaml` — standalone Hermes backend descriptor.
-- `backend/dashboard/plugin_api.py` — profile/model discovery, jobs, cancellation, diagnostics, and opt-in Kanban integration.
+- `backend/dashboard/plugin_api.py` — profile/model discovery, capability routes, jobs, cancellation, diagnostics, and opt-in Kanban integration.
+- `backend/dashboard/capability_center.py` — isolated safe capability projection and confirmed Host/Docker target updates.
 - `backend/dashboard/control_store.py` — durable run identity, control queue, leases, receipts, history, status, and privacy-reduced event ledger.
 - `backend/dashboard/dock_runner.py` — JSON-stdin profile runner and bounded result serializer.
 - `install.py` / `uninstall.py` — reversible, stdlib-only lifecycle.
@@ -324,7 +327,7 @@ Read [CONTRIBUTING.md](CONTRIBUTING.md) before submitting. It defines the focuse
 - Public SDK support for durable backend job persistence across a full Desktop process restart.
 - Authorized cross-channel profile continuity: channel-specific transcripts with shared durable profile context and task state, plus explicit exact-session handoff between Telegram, Agent Dock, and future surfaces.
 
-## Known limitations in v0.4.0
+## Known limitations in v0.5.0
 
 - Responses appear after bounded background polling; token-by-token streaming is not available.
 - Hermes-native floating panes can move, collapse, and remember their host-owned position, but Agent Dock does not claim arbitrary freeform resizing.

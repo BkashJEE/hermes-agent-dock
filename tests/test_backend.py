@@ -636,6 +636,49 @@ class BackendSecurityTests(unittest.TestCase):
         self.assertTrue(result["capabilities"]["kanban_assignment"])
         self.assertEqual(result["capabilities"]["kanban_board"], "executive-organization")
 
+    def test_capability_route_binds_exact_profile(self):
+        projected = {
+            "profile": "jarvis",
+            "model": {},
+            "credentials": {},
+            "skills": [],
+            "toolsets": [],
+            "mcp_servers": [],
+            "approvals": {},
+            "execution": {"target": "host"},
+        }
+        with patch.object(api, "_profile_capabilities", return_value=projected) as scan:
+            self.assertEqual(api.profile_capabilities("jarvis"), projected)
+        scan.assert_called_once_with("jarvis")
+
+    def test_execution_target_requires_explicit_boolean_confirmation(self):
+        with self.assertRaises(ValidationError):
+            api.ExecutionTargetRequest(target="docker", confirmed="true")
+        request = api.ExecutionTargetRequest(target="docker", confirmed=False)
+        with self.assertRaises(api.HTTPException) as raised:
+            api.update_execution_target("jarvis", request)
+        self.assertEqual(raised.exception.status_code, 409)
+
+    def test_execution_target_update_is_narrow_and_reports_new_sessions(self):
+        projected = {
+            "profile": "jarvis",
+            "model": {},
+            "credentials": {},
+            "skills": [],
+            "toolsets": [],
+            "mcp_servers": [],
+            "approvals": {},
+            "execution": {"target": "docker", "takes_effect": "new_sessions"},
+        }
+        request = api.ExecutionTargetRequest(
+            target="docker", confirmed=True, docker_image="python:3.13"
+        )
+        with patch.object(api, "_profile_capabilities", return_value=projected) as update:
+            result = api.update_execution_target("jarvis", request)
+        update.assert_called_once_with("jarvis", target="docker", image="python:3.13")
+        self.assertTrue(result["updated"])
+        self.assertIn("running sessions were not changed", result["notice"])
+
     @patch.object(api, "_build_command", return_value=[sys.executable, "runner", "--chat"])
     @patch.object(api.threading, "Thread")
     def test_duplicate_request_id_reuses_job_without_second_thread(self, thread_cls, _command):
