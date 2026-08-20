@@ -208,7 +208,7 @@ class BackendSecurityTests(unittest.TestCase):
 
     def test_reasoning_and_fast_are_capability_gated(self):
         with self.validation():
-            api._build_command(self.request(reasoning_effort="ultra"))
+            api._build_command(self.request(reasoning_effort=api.VALID_REASONING_EFFORTS[-1]))
             api._build_command(self.request(fast=True))
             with self.assertRaisesRegex(ValueError, "Invalid reasoning effort"):
                 api._build_command(self.request(reasoning_effort="extreme"))
