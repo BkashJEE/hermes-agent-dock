@@ -90,6 +90,19 @@ const MODEL_DISPLAY_LABELS = Object.freeze({
 const ACTIVE_JOB_STATUSES = new Set(['starting', 'queued', 'running', 'finalizing', 'cancelling'])
 const STARTING_JOB_TTL_MS = 60_000
 
+function capabilityCounts(payload) {
+  const enabled = rows => Array.isArray(rows) ? rows.filter(row => row?.enabled !== false).length : 0
+  return {
+    skills: enabled(payload?.skills),
+    toolsets: enabled(payload?.toolsets),
+    mcp: enabled(payload?.mcp_servers)
+  }
+}
+
+function executionTargetLabel(target) {
+  return target === 'docker' ? 'Docker' : target === 'host' ? 'Host' : 'Other'
+}
+
 function normalizeDockMode(mode) {
   return DOCK_MODES.includes(mode) ? mode : DEFAULT_DOCK_MODE
 }
@@ -2668,6 +2681,39 @@ function AgentDock({ mode = DEFAULT_DOCK_MODE, onToggleMode }) {
   const [soulText, setSoulText] = useState('')
   const [soulLoading, setSoulLoading] = useState(false)
   const [dupBusy, setDupBusy] = useState(false)
+  const [capabilityOpen, setCapabilityOpen] = useState(false)
+  const [targetBusy, setTargetBusy] = useState(false)
+
+  const capabilityQuery = useQuery({
+    queryKey: [ID, 'capabilities', currentName],
+    queryFn: () => rest(`/capabilities/${encodeURIComponent(currentName)}`),
+    enabled: Boolean(currentName && capabilityOpen),
+    refetchInterval: capabilityOpen ? 20_000 : false
+  })
+  const capabilityPayload = capabilityQuery.data || null
+  const capabilitySummary = capabilityCounts(capabilityPayload)
+
+  const chooseExecutionTarget = async target => {
+    if (targetBusy || !currentName || target === capabilityPayload?.execution?.target) return
+    const label = executionTargetLabel(target)
+    const confirmed = window.confirm(
+      `Use ${label} for new ${profileDisplayLabel(currentName)} sessions? Running sessions will not change.`
+    )
+    if (!confirmed) return
+    setTargetBusy(true)
+    try {
+      await rest(`/capabilities/${encodeURIComponent(currentName)}/execution-target`, {
+        method: 'PUT',
+        body: { target, confirmed: true }
+      })
+      await capabilityQuery.refetch()
+      host.notify({ kind: 'success', message: `${label} saved for new ${profileDisplayLabel(currentName)} sessions.` })
+    } catch (error) {
+      host.notify({ kind: 'error', message: `Execution target update failed: ${error?.message || error}` })
+    } finally {
+      setTargetBusy(false)
+    }
+  }
 
   const actRoutine = async (job, action) => {
     if (routineBusy) return
@@ -3531,6 +3577,86 @@ function AgentDock({ mode = DEFAULT_DOCK_MODE, onToggleMode }) {
                             ]
                           })
                         : null,
+                    jsxs('div', {
+                      className: 'rounded-md border border-(--ui-stroke-secondary) bg-(--ui-bg-secondary)',
+                      'data-agent-dock-capability-center': currentName,
+                      children: [
+                        jsxs('button', {
+                          'aria-expanded': capabilityOpen,
+                          className: 'flex h-8 w-full items-center gap-1.5 px-2 text-left text-[0.66rem] text-(--ui-text-secondary)',
+                          onClick: () => setCapabilityOpen(open => !open),
+                          type: 'button',
+                          children: [
+                            jsx(Codicon, { name: capabilityOpen ? 'chevron-down' : 'chevron-right', size: '0.68rem' }),
+                            jsx(Codicon, { name: 'shield', size: '0.72rem' }),
+                            jsx('span', { className: 'font-medium', children: 'Capability Center' }),
+                            capabilityPayload
+                              ? jsx('span', {
+                                  className: 'ml-auto text-[0.6rem] text-(--ui-text-tertiary)',
+                                  children: `${executionTargetLabel(capabilityPayload.execution?.target)} · ${capabilitySummary.skills} skills`
+                                })
+                              : null
+                          ]
+                        }),
+                        capabilityOpen
+                          ? capabilityQuery.isPending
+                            ? jsx('p', { className: 'border-t border-(--ui-stroke-secondary) px-2 py-2 text-[0.62rem] text-(--ui-text-tertiary)', children: 'Scanning this Hermes profile…' })
+                            : capabilityQuery.isError
+                              ? jsx('p', { className: 'border-t border-(--ui-stroke-secondary) px-2 py-2 text-[0.62rem] text-(--ui-danger)', children: 'Capability scan unavailable. No profile settings were changed.' })
+                              : jsxs('div', {
+                                  className: 'space-y-2 border-t border-(--ui-stroke-secondary) px-2 py-2 text-[0.62rem]',
+                                  children: [
+                                    jsxs('div', {
+                                      className: 'grid grid-cols-3 gap-1',
+                                      children: [
+                                        jsx('span', { className: 'rounded bg-(--ui-control-hover-background) px-1.5 py-1 text-center', children: `${capabilitySummary.skills} skills` }),
+                                        jsx('span', { className: 'rounded bg-(--ui-control-hover-background) px-1.5 py-1 text-center', children: `${capabilitySummary.toolsets} tools` }),
+                                        jsx('span', { className: 'rounded bg-(--ui-control-hover-background) px-1.5 py-1 text-center', children: `${capabilitySummary.mcp} MCP` })
+                                      ]
+                                    }),
+                                    jsxs('p', {
+                                      className: 'truncate text-(--ui-text-tertiary)',
+                                      children: [
+                                        `${capabilityPayload?.model?.provider || 'No provider'} · ${capabilityPayload?.model?.name || 'No model'} · credentials `,
+                                        capabilityPayload?.credentials?.provider_configured ? 'configured' : 'not configured'
+                                      ]
+                                    }),
+                                    jsxs('div', {
+                                      className: 'flex items-center gap-1.5',
+                                      children: [
+                                        jsx('span', { className: 'mr-auto font-medium text-(--ui-text-secondary)', children: 'Execution target' }),
+                                        ...['host', 'docker'].map(target => jsx('button', {
+                                          'aria-pressed': capabilityPayload?.execution?.target === target,
+                                          className: cn(
+                                            'rounded border px-2 py-1',
+                                            capabilityPayload?.execution?.target === target
+                                              ? 'border-(--ui-accent) bg-[color-mix(in_srgb,var(--ui-accent)_14%,transparent)] text-(--ui-accent)'
+                                              : 'border-(--ui-stroke-secondary) text-(--ui-text-tertiary)'
+                                          ),
+                                          disabled: targetBusy || (target === 'docker' && (
+                                            capabilityPayload?.execution?.docker_available !== true ||
+                                            capabilityPayload?.execution?.safe_to_enable_docker === false
+                                          )),
+                                          onClick: () => void chooseExecutionTarget(target),
+                                          title: target === 'docker' && capabilityPayload?.execution?.docker_available !== true
+                                            ? 'Install and start Docker Desktop to enable this target'
+                                            : target === 'docker' && capabilityPayload?.execution?.safe_to_enable_docker === false
+                                              ? 'Review existing mounts, environment forwarding, or extra Docker settings in Hermes first'
+                                              : `Use ${executionTargetLabel(target)} for new sessions`,
+                                          type: 'button',
+                                          children: executionTargetLabel(target)
+                                        }, target))
+                                      ]
+                                    }),
+                                    jsx('p', {
+                                      className: 'text-[0.6rem] text-(--ui-text-quaternary)',
+                                      children: 'Secrets, MCP commands, mounts, and forwarded environment values are never displayed.'
+                                    })
+                                  ]
+                                })
+                          : null
+                      ]
+                    }),
                     jsxs('div', {
                       className: 'flex items-center gap-1.5',
                       children: [

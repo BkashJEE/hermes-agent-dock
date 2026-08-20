@@ -28,9 +28,11 @@ Give a Hermes Desktop user a fast, direct route to any configured specialist pro
 20. Blind cross-channel transcript merging is not part of v0.3.0. Telegram and Agent Dock retain channel-scoped transcripts; live attachment uses explicit profile/session/run identity rather than a matching display name.
 21. Live attachment requires an exact `(runtime profile, stable session ID, runtime session ID, Dock run ID)` binding obtained from `session.active_list`; private session previews are not copied into Dock state.
 22. The profile-local SQLite ledger runs in WAL mode with foreign keys, bounded busy timeout, additive schema versioning, stable message IDs, one-winner dispatch leases, restart recovery, and immutable terminal receipt states.
-23. ASK dispatches only to an idle live session through `prompt.submit`; NUDGE uses `session.steer`; confirmed REDIRECT uses `session.redirect`; confirmed Stop uses `session.interrupt`. The UI never claims per-run Pause/Resume because Hermes has no verified contract for it.
-24. REDIRECT and Stop require explicit confirmation. Every control request uses `inherit-only` authority and cannot expand tools, credentials, filesystem scope, approvals, or provider access.
-25. `queued`, `dispatching`, `accepted`, `delivered`, and `applied` are distinct. The Dock does not label a gateway-accepted request as applied without an explicit consumer-originated receipt.
+23. Capability Center scans any exact profile returned by Hermes in a short-lived profile-scoped process and returns only allowlisted provider/model, boolean credential state, skills, toolsets, MCP server names, approval posture, and execution target metadata.
+24. Host/Docker changes require explicit boolean confirmation, preserve safe unmanaged terminal settings, apply only to new sessions, and do not start Docker or mutate a running session. Enabling Docker fails closed when dormant mounts, environment forwarding, extra arguments, or persistence settings exist.
+25. ASK dispatches only to an idle live session through `prompt.submit`; NUDGE uses `session.steer`; confirmed REDIRECT uses `session.redirect`; confirmed Stop uses `session.interrupt`. The UI never claims per-run Pause/Resume because Hermes has no verified contract for it.
+26. REDIRECT and Stop require explicit confirmation. Every control request uses `inherit-only` authority and cannot expand tools, credentials, filesystem scope, approvals, or provider access.
+27. `queued`, `dispatching`, `accepted`, `delivered`, and `applied` are distinct. The Dock does not label a gateway-accepted request as applied without an explicit consumer-originated receipt.
 26. Attached history, privacy-reduced events, status observations, verification evidence, and optional Kanban synchronization are run-scoped and survive a Desktop backend restart.
 
 ## Supported specialist routing

@@ -1,8 +1,8 @@
 {
   "name": "hermes-agent-dock",
   "label": "Hermes Agent Dock",
-  "description": "Profile/model discovery, direct specialist sessions, bounded diagnostics, and opt-in Kanban assignments for the Hermes Desktop Agent Dock.",
+  "description": "Profile capability inventory, Host/Docker execution targets, direct specialist sessions, and bounded diagnostics for Hermes Desktop.",
   "icon": "MessagesSquare",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "api": "plugin_api.py"
 }

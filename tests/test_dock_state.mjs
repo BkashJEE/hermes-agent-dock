@@ -12,10 +12,12 @@ const exported = [
   'attachmentDisplayName',
   'buildJobPayload',
   'compactModelLabel',
+  'capabilityCounts',
   'copyTextToClipboard',
   'dockModeAction',
   'dockPaneData',
   'extractClipboardImageFiles',
+  'executionTargetLabel',
   'flattenModelOptions',
   'formatMessageTimestamp',
   'groupModelOptions',
@@ -86,6 +88,29 @@ const catalog = {
     }
   ]
 }
+
+test('Capability Center summarizes only enabled public rows', () => {
+  assert.deepEqual(
+    state.capabilityCounts({
+      skills: [{ enabled: true }, { enabled: false }, {}],
+      toolsets: [{ enabled: true }],
+      mcp_servers: [{ enabled: false }, { enabled: true }]
+    }),
+    { skills: 2, toolsets: 1, mcp: 1 }
+  )
+  assert.deepEqual(state.capabilityCounts(null), { skills: 0, toolsets: 0, mcp: 0 })
+  assert.equal(state.executionTargetLabel('docker'), 'Docker')
+  assert.equal(state.executionTargetLabel('host'), 'Host')
+  assert.equal(state.executionTargetLabel('ssh'), 'Other')
+})
+
+test('Capability Center uses explicit confirmation and a profile-scoped endpoint', () => {
+  assert.match(pluginSource, /`\/capabilities\/\$\{encodeURIComponent\(currentName\)\}`/)
+  assert.match(pluginSource, /window\.confirm\(/)
+  assert.match(pluginSource, /body: \{ target, confirmed: true \}/)
+  assert.match(pluginSource, /'data-agent-dock-capability-center': currentName/)
+  assert.match(pluginSource, /Secrets, MCP commands, mounts, and forwarded environment values are never displayed\./)
+})
 
 test('subagent disclosure keeps the compact public allowlist and exact job snapshot', () => {
   const rows = [

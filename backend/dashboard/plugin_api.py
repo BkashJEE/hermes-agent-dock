@@ -75,7 +75,7 @@ public_subagent_record = _SUBAGENT_MODULE.public_subagent_record
 
 router = APIRouter()
 
-PLUGIN_VERSION = "0.4.0"
+PLUGIN_VERSION = "0.5.0"
 MAX_MESSAGE_CHARS = 12_000
 MAX_RESPONSE_CHARS = 120_000
 MAX_IMAGE_ATTACHMENTS = 4
@@ -85,6 +85,7 @@ MAX_IMAGE_DATA_URL_CHARS = ((MAX_IMAGE_BYTES + 2) // 3) * 4 + 128
 MAX_CONCURRENT_JOBS = 4
 JOB_TIMEOUT_SECONDS = 15 * 60
 CATALOG_TIMEOUT_SECONDS = 60
+CAPABILITY_TIMEOUT_SECONDS = 30
 CATALOG_CACHE_SECONDS = 15
 JOB_RETENTION_SECONDS = 60 * 60
 MAX_RETAINED_JOBS = 200
@@ -333,6 +334,40 @@ AssignAfterRequest.model_rebuild(_types_namespace={"Any": Any})
 RetryRequest.model_rebuild(
     _types_namespace={"ImageAttachment": ImageAttachment, "Any": Any}
 )
+
+
+class ExecutionTargetRequest(BaseModel):
+    target: str
+    confirmed: StrictBool = False
+    docker_image: str | None = None
+
+    @field_validator("confirmed", mode="before")
+    @classmethod
+    def require_confirmation_boolean(cls, value: Any) -> bool:
+        if type(value) is not bool:
+            raise ValueError("confirmed must be a JSON boolean")
+        return value
+
+    @field_validator("target", mode="before")
+    @classmethod
+    def normalize_target(cls, value: Any) -> str:
+        target = str(value or "").strip().lower()
+        if target not in {"host", "docker"}:
+            raise ValueError("target must be host or docker")
+        return target
+
+    @field_validator("docker_image", mode="before")
+    @classmethod
+    def normalize_image(cls, value: Any) -> str | None:
+        if value is None:
+            return None
+        image = str(value).strip()
+        if not image or len(image) > 200 or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/:@-]*", image):
+            raise ValueError("docker_image is invalid")
+        return image
+
+
+ExecutionTargetRequest.model_rebuild(_types_namespace={"StrictBool": StrictBool, "Any": Any})
 
 
 def _control_store() -> Any:
@@ -806,6 +841,45 @@ def _catalog_environment(profile: str) -> dict[str, str]:
     env = _child_env()
     env["HERMES_HOME"] = str(_profile_home(profile))
     return env
+
+
+def _capability_command(target: str | None = None, image: str | None = None) -> list[str]:
+    command = [sys.executable, str(Path(__file__).resolve().with_name("capability_center.py"))]
+    if target:
+        command.extend(["--set-target", target])
+    if image:
+        command.extend(["--image", image])
+    return command
+
+
+def _profile_capabilities(profile: str, *, target: str | None = None, image: str | None = None) -> dict[str, Any]:
+    normalized = _normalize_profile(profile)
+    try:
+        result = subprocess.run(
+            _capability_command(target, image),
+            cwd=str(_root_home()),
+            env=_catalog_environment(normalized),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=CAPABILITY_TIMEOUT_SECONDS,
+            check=False,
+            shell=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError("Hermes capability scan timed out") from exc
+    if result.returncode != 0:
+        raise RuntimeError("Hermes capability scan failed safely")
+    try:
+        payload = json.loads(result.stdout or "")
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("Hermes capability scan returned invalid JSON") from exc
+    required = {"model", "credentials", "skills", "toolsets", "mcp_servers", "approvals", "execution"}
+    if not isinstance(payload, dict) or not required.issubset(payload):
+        raise RuntimeError("Hermes capability scan returned an invalid payload")
+    return {"profile": normalized, **payload}
 
 
 def _load_model_catalog(profile: str, *, refresh: bool = False) -> dict[str, Any]:
@@ -1318,6 +1392,31 @@ def models(profile: str) -> dict[str, Any]:
         return _load_model_catalog(normalized)
     except Exception as exc:
         raise HTTPException(status_code=503, detail="Hermes model catalog is unavailable") from exc
+
+
+@router.get("/capabilities/{profile}")
+def profile_capabilities(profile: str) -> dict[str, Any]:
+    try:
+        return _profile_capabilities(profile)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail="Hermes capability scan is unavailable") from exc
+
+
+@router.put("/capabilities/{profile}/execution-target")
+def update_execution_target(profile: str, request: ExecutionTargetRequest) -> dict[str, Any]:
+    if not request.confirmed:
+        raise HTTPException(status_code=409, detail="Explicit confirmation is required")
+    try:
+        payload = _profile_capabilities(profile, target=request.target, image=request.docker_image)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail="Hermes execution target could not be updated") from exc
+    payload["updated"] = True
+    payload["notice"] = "Execution target saved for new sessions; running sessions were not changed."
+    return payload
 
 
 def _known_control_profile(profile: str) -> str:
